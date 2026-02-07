@@ -1178,6 +1178,12 @@ def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path):
     # --- Subplot 1: Input Power vs RPM ---
     ax = axs[0]
     
+    # Plot ±10% and ±20% error bands around spec curve
+    ax.fill_between(power_range, rpm_curve * 0.8, rpm_curve * 1.2, 
+                    color='gray', alpha=0.15, label='±20%')
+    ax.fill_between(power_range, rpm_curve * 0.9, rpm_curve * 1.1, 
+                    color='gray', alpha=0.25, label='±10%')
+    
     # Plot spec curve
     ax.plot(power_range, rpm_curve, 'k-', linewidth=2.5, label=f'Spec: {MOTOR_SPEC["name"]}', alpha=0.8)
     ax.scatter(spec_power, spec_rpm, color='black', s=40, zorder=5, marker='s', label='Spec data points')
