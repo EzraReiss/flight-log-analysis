@@ -100,6 +100,46 @@ MOTOR_SPEC = {
     }
 }
 
+# Calculate propeller constant k from datasheet: P_out = k × RPM³
+# For propellers: Output Power is proportional to RPM cubed
+def calculate_propeller_constant():
+    """Derive propeller constant k from datasheet where P_out = k × RPM³."""
+    k_values = []
+    for throttle, data in MOTOR_SPEC['data'].items():
+        output_power = data[3]  # Output Power (W)
+        rpm = data[4]           # RPM
+        if rpm > 0:
+            k = output_power / (rpm ** 3)
+            k_values.append(k)
+    return sum(k_values) / len(k_values) if k_values else 0
+
+# Propeller constant for CF FLUXER 22.1x7.4 VTOL prop
+# P_output (W) = PROP_K * RPM^3
+PROP_K = calculate_propeller_constant()
+
+def estimate_output_power(rpm):
+    """Estimate propeller output power from RPM using cubic relationship.
+    
+    For propellers: P_out = k × RPM³
+    Returns estimated output power in Watts.
+    """
+    if rpm <= 0:
+        return 0
+    return PROP_K * (rpm ** 3)
+
+def calculate_motor_efficiency(rpm, input_power):
+    """Calculate motor efficiency as Output Power / Input Power.
+    
+    Uses the propeller cubic relationship to estimate output power from RPM.
+    Returns efficiency as percentage (0-100), or None if invalid.
+    """
+    if input_power <= 0 or rpm <= 0:
+        return None
+    output_power = estimate_output_power(rpm)
+    efficiency = (output_power / input_power) * 100
+    # Cap at 100% (measurement noise can cause >100%)
+    return min(efficiency, 100.0)
+
 # =============================================================================
 # Caching Functions
 # =============================================================================
@@ -452,13 +492,14 @@ def compute_derived_metrics(esc_data, rc_filter=0):
             i = curr_filtered[j]
             rpm = data['rpm'][j]
             
-            p = v * i  # Watts
+            p = v * i  # Input Power (Watts)
             power.append(p)
             
-            # Efficiency: RPM per Watt (only for reliable current readings)
+            # Motor Efficiency: Output Power / Input Power (%)
+            # Uses propeller cubic relationship: P_out = k × RPM³
             # Filter out low current data (sensor inaccurate below threshold)
             if i >= MIN_CURRENT_THRESHOLD and p > 1.0:
-                eff = rpm / p
+                eff = calculate_motor_efficiency(rpm, p)
             else:
                 eff = None  # Mark as invalid/unreliable
             efficiency.append(eff)
