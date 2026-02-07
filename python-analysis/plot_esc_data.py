@@ -131,14 +131,16 @@ def calculate_motor_efficiency(rpm, input_power):
     """Calculate motor efficiency as Output Power / Input Power.
     
     Uses the propeller cubic relationship to estimate output power from RPM.
-    Returns efficiency as percentage (0-100), or None if invalid.
+    Returns efficiency as percentage, or None if invalid.
+    
+    Note: Values >100% indicate the propeller constant may need calibration
+    for the specific test conditions (voltage, temperature, etc.)
     """
     if input_power <= 0 or rpm <= 0:
         return None
     output_power = estimate_output_power(rpm)
     efficiency = (output_power / input_power) * 100
-    # Cap at 100% (measurement noise can cause >100%)
-    return min(efficiency, 100.0)
+    return efficiency
 
 # =============================================================================
 # Caching Functions
@@ -1151,7 +1153,7 @@ def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path):
     
     Creates 2 subplots:
     1. Input Power vs RPM - compares measured RPM at given power to spec
-    2. Efficiency (RPM/W) vs Input Power - compares efficiency curves
+    2. Efficiency (%) vs Input Power - compares motor efficiency curves
     """
     setup_style()
     fig, axs = plt.subplots(2, 1, figsize=(12, 10))
@@ -1200,6 +1202,7 @@ def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path):
     ax.set_title('RPM vs Input Power')
     ax.legend(loc='lower right', fontsize=8)
     ax.grid(True, alpha=0.3)
+    ax.set_ylim(bottom=0)  # Start RPM axis at 0
     
     # --- Subplot 2: Efficiency vs Input Power ---
     ax = axs[1]
@@ -1208,13 +1211,11 @@ def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path):
     ax.plot(power_range, eff_curve, 'k-', linewidth=2.5, label=f'Spec: {MOTOR_SPEC["name"]}', alpha=0.8)
     ax.scatter(spec_power, spec_eff, color='black', s=40, zorder=5, marker='s', label='Spec data points')
     
-    # Calculate and plot measured efficiency (Output Power / Input Power * 100)
-    # For our purposes, we'll use RPM/W as efficiency proxy since we don't have output power
-    # We'll scale it to compare shape, not absolute values
+    # Plot measured efficiency (Output Power / Input Power * 100)
     for i in active_escs:
         if i in esc_data and i in derived['per_esc']:
             power = derived['per_esc'][i]['power']
-            effs = derived['per_esc'][i]['efficiency']  # RPM/W
+            effs = derived['per_esc'][i]['efficiency']  # Now in % (output/input * 100)
             curr = esc_data[i]['curr']
             
             # Filter for reliable readings
@@ -1223,21 +1224,18 @@ def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path):
             for p, e, c in zip(power, effs, curr):
                 if c >= MIN_CURRENT_THRESHOLD and e is not None and p > 10:
                     valid_power.append(p)
-                    # Convert RPM/W to approximate efficiency % (scale to match spec range)
-                    # Typical spec shows 72-81% efficiency; RPM/W is typically 2-4
-                    scaled_eff = e * 20  # Rough scaling factor
-                    valid_eff.append(min(scaled_eff, 100))  # Cap at 100%
+                    valid_eff.append(e)  # Already in %
             
             if valid_power:
                 ax.scatter(valid_power, valid_eff, color=COLORS[i % 4], alpha=0.4, s=8,
-                          label=f'ESC {i} (scaled RPM/W)')
+                          label=f'ESC {i} measured')
     
     ax.set_xlabel('Input Power (W)')
     ax.set_ylabel('Efficiency (%)')
-    ax.set_title('Efficiency vs Input Power (Measured = scaled RPM/W)')
+    ax.set_title('Motor Efficiency vs Input Power')
     ax.legend(loc='lower left', fontsize=8)
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, 100)
+    ax.set_ylim(0, 110)  # Allow slightly over 100% for calibration differences
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=120)
