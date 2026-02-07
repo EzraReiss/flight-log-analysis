@@ -32,7 +32,7 @@ except ImportError:
 
 # Minimum current threshold for reliable sensor readings
 # Data below this value is excluded from efficiency/voltage sag calculations
-MIN_CURRENT_THRESHOLD = 18.0  # Amps (raised from 10A to exclude shutdown periods)
+MIN_CURRENT_THRESHOLD = 5.0  # Amps (raised from 10A to exclude shutdown periods)
 
 # Minimum throttle threshold for active motor data
 # Data below this PWM value indicates motor is ramping down/stopped
@@ -41,7 +41,7 @@ MIN_THROTTLE_THRESHOLD = 1400  # PWM value (typically 1000-2000 range)
 # Low-pass filter RC time constant (seconds)
 # Higher = more smoothing, lower = less smoothing
 # Range: 0.25 to 5.0 seconds (0 = disabled)
-DEFAULT_FILTER_RC = 1.0
+DEFAULT_FILTER_RC = 2.0
 
 # Cache directory (stored next to the bin file)
 CACHE_VERSION = "v4"  # Increment when cache format changes (v4 fixes throttle lookup to use max)
@@ -707,8 +707,11 @@ def plot_all_runs_combined(combined_data, run_boundaries, active_escs, title_pre
     plt.show()
 
 
-def plot_esc_basics(esc_data, active_escs, title_prefix, save_path):
-    """Plot RPM, Voltage, Current, Temperature for selected ESCs with per-ESC stats in legend."""
+def plot_esc_basics(esc_data, active_escs, title_prefix, save_path, derived=None):
+    """Plot RPM, Voltage, Current, Temperature for selected ESCs with per-ESC stats in legend.
+    
+    If derived dict is provided and contains filtered data, uses that for volt/curr plots.
+    """
     setup_style()
     fig, axs = plt.subplots(4, 1, figsize=(14, 11), sharex=True)
     fig.suptitle(f'{title_prefix} - ESC Overview', fontsize=14)
@@ -723,7 +726,14 @@ def plot_esc_basics(esc_data, active_escs, title_prefix, save_path):
         
         for i in active_escs:
             if i in esc_data and esc_data[i]['time']:
-                values = esc_data[i][key]
+                # Use filtered data for volt and curr if available
+                if key == 'volt' and derived and i in derived.get('per_esc', {}) and 'volt_filtered' in derived['per_esc'][i]:
+                    values = derived['per_esc'][i]['volt_filtered']
+                elif key == 'curr' and derived and i in derived.get('per_esc', {}) and 'curr_filtered' in derived['per_esc'][i]:
+                    values = derived['per_esc'][i]['curr_filtered']
+                else:
+                    values = esc_data[i][key]
+                
                 # Include stats in legend label (min/med/max)
                 label = f'ESC {i} ({min(values):.1f}/{np.median(values):.1f}/{max(values):.1f})'
                 ax.plot(esc_data[i]['time'], values, 
@@ -1424,7 +1434,7 @@ def main():
         base_save = os.path.join(output_dir, run_prefix)
         
         if choice == '1':
-            plot_esc_basics(esc_data, active_escs, title, f"{base_save}_basics.png")
+            plot_esc_basics(esc_data, active_escs, title, f"{base_save}_basics.png", derived)
         elif choice == '2':
             plot_power(esc_data, derived, active_escs, title, f"{base_save}_power.png")
         elif choice == '3':
