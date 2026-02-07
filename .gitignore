@@ -1,0 +1,33 @@
+# Binary log files
+*.BIN
+*.bin
+*.json
+*.parquet
+
+# Generated data files
+*.csv
+
+# Generated images
+*.png
+*.jpg
+*.jpeg
+
+# Cache files
+*_cache/
+__pycache__/
+*.pyc
+*.pyo
+
+# Analysis output folders
+*_analysis/
+
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
