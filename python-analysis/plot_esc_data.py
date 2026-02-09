@@ -32,7 +32,7 @@ except ImportError:
 
 # Minimum current threshold for reliable sensor readings
 # Data below this value is excluded from efficiency/voltage sag calculations
-MIN_CURRENT_THRESHOLD = 5.0  # Amps (raised from 10A to exclude shutdown periods)
+MIN_CURRENT_THRESHOLD = 10.0  # Amps (raised from 10A to exclude shutdown periods)
 
 # Minimum throttle threshold for active motor data
 # Data below this PWM value indicates motor is ramping down/stopped
