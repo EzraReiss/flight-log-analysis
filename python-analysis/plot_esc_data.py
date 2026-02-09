@@ -457,11 +457,17 @@ def compute_derived_metrics(esc_data, rc_filter=0):
         'total': {'time': [], 'curr': [], 'power': []}
     }
     
-    # First, find a common time base (use ESC 0's timestamps as reference)
-    if not esc_data or 0 not in esc_data:
-        ref_instance = list(esc_data.keys())[0] if esc_data else None
-    else:
-        ref_instance = 0
+    # First, find a common time base (use first ESC with data as reference)
+    ref_instance = None
+    if esc_data:
+        # Prefer ESC 0 if it has data, otherwise take first one with data
+        if 0 in esc_data and len(esc_data[0]['time']) > 0:
+            ref_instance = 0
+        else:
+            for inst in sorted(esc_data.keys()):
+                if len(esc_data[inst]['time']) > 0:
+                    ref_instance = inst
+                    break
         
     if ref_instance is None:
         return derived
@@ -488,6 +494,7 @@ def compute_derived_metrics(esc_data, rc_filter=0):
         
         power = []
         efficiency = []
+        efficiency_rpm_w = []
         
         for j in range(n):
             v = volt_filtered[j]
@@ -501,10 +508,14 @@ def compute_derived_metrics(esc_data, rc_filter=0):
             # Uses propeller cubic relationship: P_out = k × RPM³
             # Filter out low current data (sensor inaccurate below threshold)
             if i >= MIN_CURRENT_THRESHOLD and p > 1.0:
-                eff = calculate_motor_efficiency(rpm, p)
+                eff_pct = calculate_motor_efficiency(rpm, p)
+                eff_rpm_w = rpm / p if p > 0 else 0
             else:
-                eff = None  # Mark as invalid/unreliable
-            efficiency.append(eff)
+                eff_pct = None  # Mark as invalid/unreliable
+                eff_rpm_w = None
+            
+            efficiency.append(eff_pct)  # Default to %
+            efficiency_rpm_w.append(eff_rpm_w)
             
             # Accumulate totals (only if same length)
             if j < len(total_curr):
@@ -514,6 +525,8 @@ def compute_derived_metrics(esc_data, rc_filter=0):
         derived['per_esc'][inst] = {
             'power': power,
             'efficiency': efficiency,
+            'efficiency_pct': efficiency,
+            'efficiency_rpm_w': efficiency_rpm_w,
             'volt_filtered': volt_filtered,
             'curr_filtered': curr_filtered
         }
@@ -856,11 +869,19 @@ def plot_power(esc_data, derived, active_escs, title_prefix, save_path):
     plt.show()
 
 
-def plot_efficiency(esc_data, derived, active_escs, title_prefix, save_path):
-    """Plot Efficiency (RPM/Watt) for selected ESCs. Only shows valid readings (current >= threshold)."""
+def plot_efficiency(esc_data, derived, active_escs, title_prefix, save_path, mode='pct'):
+    """Plot Efficiency for selected ESCs. Only shows valid readings.
+    
+    Args:
+        mode: 'pct' for Motor Efficiency (%), 'rpm_w' for RPM/Watt
+    """
     setup_style()
+    
+    ylabel = 'Efficiency (%)' if mode == 'pct' else 'Efficiency (RPM/W)'
+    data_key = 'efficiency_pct' if mode == 'pct' else 'efficiency_rpm_w'
+    
     fig, ax = plt.subplots(figsize=(12, 5))
-    fig.suptitle(f'{title_prefix} - Efficiency (RPM/Watt) [Current >= {MIN_CURRENT_THRESHOLD}A]', fontsize=14)
+    fig.suptitle(f'{title_prefix} - {ylabel} [Current >= {MIN_CURRENT_THRESHOLD}A]', fontsize=14)
     
     # Get active time range for cropping
     t_start, t_end = get_active_time_range(esc_data)
@@ -868,7 +889,12 @@ def plot_efficiency(esc_data, derived, active_escs, title_prefix, save_path):
     for i in active_escs:
         if i in esc_data and i in derived['per_esc']:
             times = esc_data[i]['time']
-            effs = derived['per_esc'][i]['efficiency']
+            # Fallback for old cache or safety
+            if data_key not in derived['per_esc'][i]:
+                effs = derived['per_esc'][i]['efficiency']
+            else:
+                effs = derived['per_esc'][i][data_key]
+            
             # Filter out None values (unreliable low-current readings)
             valid_t = [t for t, e in zip(times, effs) if e is not None]
             valid_e = [e for e in effs if e is not None]
@@ -877,10 +903,13 @@ def plot_efficiency(esc_data, derived, active_escs, title_prefix, save_path):
                 ax.plot(valid_t, valid_e,
                        label=label, color=COLORS[i % 4], linewidth=1.2, alpha=0.85)
     
-    ax.set_ylabel('Efficiency (RPM/W)')
+    ax.set_ylabel(ylabel)
     ax.set_xlabel('Time (s)')
     ax.legend(loc='upper right', fontsize=8)
     ax.grid(True, alpha=0.3)
+    
+    if mode == 'pct':
+        ax.set_ylim(0, 110)
     
     # Crop X-axis to active range
     if t_start is not None and t_end is not None:
@@ -993,18 +1022,25 @@ def plot_voltage_sag(esc_data, derived, active_escs, title_prefix, save_path, es
     plt.show()
 
 
-def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path, esc_count):
+def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path, esc_count, mode='pct'):
     """Comprehensive system analysis showing voltage, current, power, and efficiency relationships.
     
     Creates 4 subplots:
-    1. Voltage vs Efficiency (RPM/W) - colored by current
-    2. Power vs Efficiency (RPM/W) - shows efficiency drop at high power
+    1. Voltage vs Efficiency (based on mode) - colored by current
+    2. Power vs Efficiency (based on mode) - shows efficiency drop at high power
     3. Current vs Efficiency - per ESC scatter
     4. Voltage vs Total Power - shows power delivery at different voltage levels
+    
+    Args:
+        mode: 'pct' for Motor Efficiency (%), 'rpm_w' for RPM/Watt
     """
     min_total_current = MIN_CURRENT_THRESHOLD * esc_count
     
     setup_style()
+    
+    ylabel = 'Efficiency (%)' if mode == 'pct' else 'Efficiency (RPM/W)'
+    data_key = 'efficiency_pct' if mode == 'pct' else 'efficiency_rpm_w'
+    
     fig, axs = plt.subplots(2, 2, figsize=(14, 11))
     fig.suptitle(f'{title_prefix} - System Analysis [Current >= {min_total_current:.0f}A total]', fontsize=14)
     
@@ -1028,7 +1064,14 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
             volt = esc_data[i]['volt'][j]
             temp = esc_data[i]['temp'][j]
             power = derived['per_esc'][i]['power'][j] if j < len(derived['per_esc'][i]['power']) else 0
-            eff = derived['per_esc'][i]['efficiency'][j] if j < len(derived['per_esc'][i]['efficiency']) else None
+            
+            # Use selected efficiency metric
+            if data_key in derived['per_esc'][i]:
+                eff_list = derived['per_esc'][i][data_key]
+            else:
+                eff_list = derived['per_esc'][i]['efficiency'] # Fallback
+                
+            eff = eff_list[j] if j < len(eff_list) else None
             
             if eff is not None and power > 0:
                 all_volts.append(volt)
@@ -1067,9 +1110,10 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
         ax.plot(v_range, p(v_range), 'k--', linewidth=1)
     
     ax.set_xlabel('Battery Voltage (V)')
-    ax.set_ylabel('Efficiency (RPM/W)')
-    ax.set_title('Efficiency vs Voltage')
+    ax.set_ylabel(ylabel)
+    ax.set_title(f'{ylabel} vs Voltage')
     ax.grid(True, alpha=0.3)
+    if mode == 'pct': ax.set_ylim(0, 110)
     
     # --- Panel 2: Power vs Efficiency ---
     ax = axs[0, 1]
@@ -1078,9 +1122,10 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
     cbar.set_label('Voltage (V)')
     
     ax.set_xlabel('Input Power (W)')
-    ax.set_ylabel('Efficiency (RPM/W)')
-    ax.set_title('Efficiency vs Power (colored by Voltage)')
+    ax.set_ylabel(ylabel)
+    ax.set_title(f'{ylabel} vs Power (colored by Voltage)')
     ax.grid(True, alpha=0.3)
+    if mode == 'pct': ax.set_ylim(0, 110)
     
     # --- Panel 3: Current vs Efficiency per ESC ---
     ax = axs[1, 0]
@@ -1090,10 +1135,11 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
                       color=COLORS[i % 4], alpha=0.4, s=10, label=f'ESC {i}')
     
     ax.set_xlabel('ESC Current (A)')
-    ax.set_ylabel('Efficiency (RPM/W)')
-    ax.set_title('Efficiency vs Current (per ESC)')
+    ax.set_ylabel(ylabel)
+    ax.set_title(f'{ylabel} vs Current (per ESC)')
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
+    if mode == 'pct': ax.set_ylim(0, 110)
     
     # --- Panel 4: Voltage vs Total Power ---
     ax = axs[1, 1]
@@ -1102,6 +1148,7 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
     ref_times = derived['total']['time']
     
     volt_power_pairs = []
+    # ... rest of function ...
     temp_for_pairs = []
     for j in range(min(len(ref_times), len(total_power))):
         # Get average voltage at this time
@@ -1148,22 +1195,35 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
     plt.show()
 
 
-def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path):
+def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path, mode='pct'):
     """Compare measured data against motor specification datasheet.
     
     Creates 2 subplots:
     1. Input Power vs RPM - compares measured RPM at given power to spec
-    2. Efficiency (%) vs Input Power - compares motor efficiency curves
+    2. Efficiency (based on mode) vs Input Power - compares curves
+    
+    Args:
+        mode: 'pct' for Motor Efficiency (%), 'rpm_w' for RPM/Watt
     """
     setup_style()
+    
+    ylabel = 'Efficiency (%)' if mode == 'pct' else 'Efficiency (RPM/W)'
+    data_key = 'efficiency_pct' if mode == 'pct' else 'efficiency_rpm_w'
+    
     fig, axs = plt.subplots(2, 1, figsize=(12, 10))
-    fig.suptitle(f'{title_prefix} - Motor Benchmark vs {MOTOR_SPEC["name"]}', fontsize=14)
+    fig.suptitle(f'{title_prefix} - Motor Benchmark [Current >= {MIN_CURRENT_THRESHOLD}A]', fontsize=14)
     
     # Extract spec data for curves
     spec_data = MOTOR_SPEC['data']
     spec_power = [spec_data[t][2] for t in sorted(spec_data.keys())]  # Input Power
     spec_rpm = [spec_data[t][4] for t in sorted(spec_data.keys())]    # RPM
     spec_eff = [spec_data[t][5] for t in sorted(spec_data.keys())]    # Efficiency %
+    
+    # Calculate RPM/W for spec if needed
+    if mode == 'rpm_w':
+        spec_eff_curve_data = [r/p if p > 0 else 0 for r, p in zip(spec_rpm, spec_power)]
+    else:
+        spec_eff_curve_data = spec_eff
     
     # Create smooth polynomial curves from spec data
     power_range = np.linspace(min(spec_power), max(spec_power), 200)
@@ -1172,7 +1232,7 @@ def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path):
     rpm_poly = np.polyfit(spec_power, spec_rpm, 3)
     rpm_curve = np.poly1d(rpm_poly)(power_range)
     
-    eff_poly = np.polyfit(spec_power, spec_eff, 3)
+    eff_poly = np.polyfit(spec_power, spec_eff_curve_data, 3)
     eff_curve = np.poly1d(eff_poly)(power_range)
     
     # --- Subplot 1: Input Power vs RPM ---
@@ -1215,13 +1275,22 @@ def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path):
     
     # Plot spec efficiency curve
     ax.plot(power_range, eff_curve, 'k-', linewidth=2.5, label=f'Spec: {MOTOR_SPEC["name"]}', alpha=0.8)
-    ax.scatter(spec_power, spec_eff, color='black', s=40, zorder=5, marker='s', label='Spec data points')
+    if mode == 'pct':
+        ax.scatter(spec_power, spec_eff, color='black', s=40, zorder=5, marker='s', label='Spec data points')
+    else:
+        ax.scatter(spec_power, spec_eff_curve_data, color='black', s=40, zorder=5, marker='s', label='Spec data points')
     
-    # Plot measured efficiency (Output Power / Input Power * 100)
+    # Plot measured efficiency
     for i in active_escs:
         if i in esc_data and i in derived['per_esc']:
             power = derived['per_esc'][i]['power']
-            effs = derived['per_esc'][i]['efficiency']  # Now in % (output/input * 100)
+            
+            # Fallback for old cache or safety
+            if data_key not in derived['per_esc'][i]:
+                effs = derived['per_esc'][i]['efficiency']
+            else:
+                effs = derived['per_esc'][i][data_key]
+                
             curr = esc_data[i]['curr']
             
             # Filter for reliable readings
@@ -1230,18 +1299,20 @@ def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path):
             for p, e, c in zip(power, effs, curr):
                 if c >= MIN_CURRENT_THRESHOLD and e is not None and p > 10:
                     valid_power.append(p)
-                    valid_eff.append(e)  # Already in %
+                    valid_eff.append(e)
             
             if valid_power:
                 ax.scatter(valid_power, valid_eff, color=COLORS[i % 4], alpha=0.4, s=8,
                           label=f'ESC {i} measured')
     
     ax.set_xlabel('Input Power (W)')
-    ax.set_ylabel('Efficiency (%)')
-    ax.set_title('Motor Efficiency vs Input Power')
+    ax.set_ylabel(ylabel)
+    ax.set_title(f'{ylabel} vs Input Power')
     ax.legend(loc='lower left', fontsize=8)
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, 110)  # Allow slightly over 100% for calibration differences
+    
+    if mode == 'pct':
+        ax.set_ylim(0, 110)
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=120)
@@ -1359,6 +1430,7 @@ def main():
     esc_data = {}  # Current run's data (filtered from all_esc_data)
     derived = {}
     filter_rc = DEFAULT_FILTER_RC  # Low-pass filter RC constant (adjustable)
+    efficiency_mode = 'pct'        # 'pct' = Motor Efficiency %, 'rpm_w' = RPM/Watt
     
     def filter_data_for_run(start_us, end_us):
         """Filter all_esc_data to just the specified time range."""
@@ -1453,13 +1525,14 @@ def main():
             run_label = "Full Log"
         esc_label = ', '.join(str(e) for e in active_escs) if len(active_escs) < 4 else "All"
         filter_label = f"{filter_rc:.1f}s" if filter_rc > 0 else "Off"
+        eff_unit_label = "%" if efficiency_mode == 'pct' else "RPM/W"
         
         print(f"\n{'='*55}")
-        print(f"Current: {run_label} | ESC: [{esc_label}] | Filter: {filter_label}")
+        print(f"Current: {run_label} | ESC: [{esc_label}] | Filter: {filter_label} | Eff: {eff_unit_label}")
         print(f"{'='*55}")
         print("[1] Plot ESC Basics (RPM, Volt, Curr, Temp)")
         print("[2] Plot Power (Total Current & Power)")
-        print("[3] Plot Efficiency (RPM/Watt)")
+        print(f"[3] Plot Efficiency ({eff_unit_label})")
         print("[4] Voltage Sag Analysis")
         print(f"[5] Benchmark vs {MOTOR_SPEC['name']}")
         print("[6] System Analysis (Voltage-Efficiency)")
@@ -1467,6 +1540,7 @@ def main():
         print("[8] Filter ESCs")
         print("[9] Export to CSV")
         print(f"[0] Adjust Low-Pass Filter (RC: {filter_label})")
+        print(f"[e] Toggle Efficiency Unit")
         print("[q] Quit")
         
         choice = input("> ").strip().lower()
@@ -1483,13 +1557,13 @@ def main():
         elif choice == '2':
             plot_power(esc_data, derived, active_escs, title, f"{base_save}_power.png")
         elif choice == '3':
-            plot_efficiency(esc_data, derived, active_escs, title, f"{base_save}_efficiency.png")
+            plot_efficiency(esc_data, derived, active_escs, title, f"{base_save}_efficiency.png", efficiency_mode)
         elif choice == '4':
             plot_voltage_sag(esc_data, derived, active_escs, title, f"{base_save}_vsag.png", detected_esc_count)
         elif choice == '5':
-            plot_benchmark(esc_data, derived, active_escs, title, f"{base_save}_benchmark.png")
+            plot_benchmark(esc_data, derived, active_escs, title, f"{base_save}_benchmark.png", efficiency_mode)
         elif choice == '6':
-            plot_system_analysis(esc_data, derived, active_escs, title, f"{base_save}_sysanalysis.png", detected_esc_count)
+            plot_system_analysis(esc_data, derived, active_escs, title, f"{base_save}_sysanalysis.png", detected_esc_count, efficiency_mode)
         elif choice == '7':
             # Change Run
             print_run_table(stats) if runs[0] != (0,0) else print("No runs to select.")
@@ -1542,6 +1616,10 @@ def main():
                 print("Done! Metrics recomputed with new filter.")
             except:
                 print("Invalid input. Keeping current filter.")
+        elif choice == 'e':
+            # Toggle efficiency unit
+            efficiency_mode = 'rpm_w' if efficiency_mode == 'pct' else 'pct'
+            print(f"Switched efficiency unit to: {'RPM/Watt' if efficiency_mode == 'rpm_w' else 'Motor Efficiency (%)'}")
         elif choice == 'q':
             print("Goodbye!")
             break
