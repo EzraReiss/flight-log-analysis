@@ -32,7 +32,7 @@ except ImportError:
 
 # Minimum current threshold for reliable sensor readings
 # Data below this value is excluded from efficiency/voltage sag calculations
-MIN_CURRENT_THRESHOLD = 10.0  # Amps (raised from 10A to exclude shutdown periods)
+MIN_CURRENT_THRESHOLD = 20.0  # Amps (raised from 10A to exclude shutdown periods)
 
 # Minimum throttle threshold for active motor data
 # Data below this PWM value indicates motor is ramping down/stopped
@@ -44,7 +44,7 @@ MIN_THROTTLE_THRESHOLD = 1400  # PWM value (typically 1000-2000 range)
 DEFAULT_FILTER_RC = 2.0
 
 # Cache directory (stored next to the bin file)
-CACHE_VERSION = "v4"  # Increment when cache format changes (v4 fixes throttle lookup to use max)
+CACHE_VERSION = "v6"  # Increment when cache format changes (v6 adds pole count to filename)
 
 
 def lowpass_filter(data, times, rc_constant):
@@ -154,20 +154,20 @@ def get_output_dir(filepath):
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
 
-def get_cache_path(filepath):
-    """Get the cache file path for a given bin file."""
+def get_cache_path(filepath, poles):
+    """Get the cache file path for a given bin file and pole config."""
     output_dir = get_output_dir(filepath)
-    return os.path.join(output_dir, "esc_data_cache.csv")
+    return os.path.join(output_dir, f"esc_data_cache_p{poles}.csv")
 
-def get_cache_meta_path(filepath):
+def get_cache_meta_path(filepath, poles):
     """Get the cache metadata file path."""
     output_dir = get_output_dir(filepath)
-    return os.path.join(output_dir, "cache_meta.json")
+    return os.path.join(output_dir, f"cache_meta_p{poles}.json")
 
-def is_cache_valid(filepath):
+def is_cache_valid(filepath, poles):
     """Check if cached data exists and is still valid."""
-    cache_path = get_cache_path(filepath)
-    meta_path = get_cache_meta_path(filepath)
+    cache_path = get_cache_path(filepath, poles)
+    meta_path = get_cache_meta_path(filepath, poles)
     
     if not os.path.exists(cache_path) or not os.path.exists(meta_path):
         return False
@@ -179,6 +179,11 @@ def is_cache_valid(filepath):
         # Check version
         if meta.get('version') != CACHE_VERSION:
             print("Cache version mismatch, reparsing...")
+            return False
+            
+        # Check pole count matches
+        if meta.get('poles') != poles:
+            print(f"Cache pole count mismatch ({meta.get('poles')} vs {poles}), reparsing...")
             return False
         
         # Check file modification time
@@ -198,12 +203,13 @@ def is_cache_valid(filepath):
         print(f"Cache validation error: {e}")
         return False
 
-def load_from_cache(filepath):
+
+def load_from_cache(filepath, poles):
     """Load ESC data and runs from cache (CSV format)."""
-    cache_path = get_cache_path(filepath)
-    meta_path = get_cache_meta_path(filepath)
+    cache_path = get_cache_path(filepath, poles)
+    meta_path = get_cache_meta_path(filepath, poles)
     
-    print("Loading from cache...")
+    print(f"Loading from cache (Poles: {poles})...")
     
     try:
         # Load ESC data from CSV
@@ -237,12 +243,13 @@ def load_from_cache(filepath):
         print(f"Cache load error: {e}")
         return None, None
 
-def save_to_cache(filepath, esc_data, runs):
+
+def save_to_cache(filepath, esc_data, runs, poles):
     """Save ESC data and runs to cache (CSV format for easy viewing)."""
-    cache_path = get_cache_path(filepath)
-    meta_path = get_cache_meta_path(filepath)
+    cache_path = get_cache_path(filepath, poles)
+    meta_path = get_cache_meta_path(filepath, poles)
     
-    print("Saving to cache...")
+    print(f"Saving to cache (Poles: {poles})...")
     
     try:
         # Convert esc_data to DataFrame
@@ -270,7 +277,8 @@ def save_to_cache(filepath, esc_data, runs):
             'bin_mtime': os.path.getmtime(filepath),
             'bin_size': os.path.getsize(filepath),
             'runs': runs,
-            'esc_count': len(esc_data)
+            'esc_count': len(esc_data),
+            'poles': poles
         }
         
         with open(meta_path, 'w') as f:
@@ -340,10 +348,13 @@ def detect_runs(filepath, throttle_threshold=1200, cooldown_sec=10.0):
     return runs
 
 
-def load_esc_data(filepath, start_us=0, end_us=0):
+def load_esc_data(filepath, start_us=0, end_us=0, poles=19):
     """Load ESC data within optional time range. Returns dict by instance.
     
-    Also captures throttle (PWM) from RCOU messages and assigns to each ESC.
+    Args:
+        filepath: Path to .BIN file
+        start_us, end_us: Time range (0=all)
+        poles: Configured pole pairs in ESC (used to correct RPM)
     """
     esc_data = defaultdict(lambda: {'time_us': [], 'time': [], 'rpm': [], 'volt': [], 'curr': [], 'temp': [], 'throttle': []})
     
@@ -434,7 +445,20 @@ def load_esc_data(filepath, start_us=0, end_us=0):
             
             esc_data[i]['time_us'].append(msg.TimeUS)
             esc_data[i]['time'].append(t_sec)
-            esc_data[i]['rpm'].append(msg.RPM)
+            # RPM Correction: Motor has 14 pole pairs.
+            # ESC RPM reading follows: RPM_read = RPM_real * (poles_configured / poles_real)
+            # So: RPM_real = RPM_read * (poles_real / poles_configured)
+            # Wait, user said: "RPM we were reading was actually 19/14*the current ESC rpm"
+            # This implies the ESC was configured for 19, but motor has 14.
+            # So the ESC *thought* it was 19.
+            # If ESC thinks 19, it counts commutations for 19 poles to get 1 revolution.
+            # Since motor only has 14, it completes a revolution faster for same commutations?
+            
+            # User logic: "reading was actually 19/14 * current ESC rpm"
+            # So we multiply by (Configured / Real).
+            rpm_scale = float(poles) / 14.0
+            esc_data[i]['rpm'].append(msg.RPM * rpm_scale)
+            
             esc_data[i]['volt'].append(msg.Volt)
             esc_data[i]['curr'].append(msg.Curr)
             esc_data[i]['temp'].append(msg.Temp)
@@ -1374,26 +1398,40 @@ def print_run_table(stats):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python plot_esc_data.py <bin_file>")
-        sys.exit(1)
-        
-    filepath = sys.argv[1].strip().strip('"').strip("'")
+    import argparse
+    parser = argparse.ArgumentParser(description='Analyze ArduPilot .BIN log for ESC data')
+    parser.add_argument('filepath', nargs='?', help='Path to .BIN file')
+    parser.add_argument('--poles', type=int, default=19, help='Configured ESC pole pairs (default: 19)')
+    args = parser.parse_args()
+    
+    if not args.filepath:
+        # Fallback for drag-and-drop or simple run
+        if len(sys.argv) > 1 and not sys.argv[1].startswith('-'):
+            filepath = sys.argv[1].strip().strip('"').strip("'")
+            poles = 19
+        else:
+            print("Usage: python plot_esc_data.py <path_to_bin_file> [--poles <count>]")
+            sys.exit(1)
+    else:
+        filepath = args.filepath.strip().strip('"').strip("'")
+        poles = args.poles
+    
     if not os.path.exists(filepath):
         print(f"Error: File not found: {filepath}")
-        return
-
+        sys.exit(1)
+        
     print(f"\n{'='*50}")
     print(f"ESC Analysis Tool")
     print(f"File: {os.path.basename(filepath)}")
+    print(f"Configured ESC Pole Pairs: {poles} (Scaling RPM by {poles}/14.0)")
     print(f"{'='*50}")
     
     # Try to load from cache first
     all_esc_data = None
     runs = None
     
-    if is_cache_valid(filepath):
-        all_esc_data, runs = load_from_cache(filepath)
+    if is_cache_valid(filepath, poles):
+        all_esc_data, runs = load_from_cache(filepath, poles)
     
     # If cache miss or invalid, parse the full file
     if all_esc_data is None:
@@ -1409,10 +1447,10 @@ def main():
         
         # Load ALL ESC data from full file
         print("Loading all ESC data...")
-        all_esc_data = load_esc_data(filepath, 0, 0)
+        all_esc_data = load_esc_data(filepath, 0, 0, poles)
         
         # Save to cache for next time
-        save_to_cache(filepath, all_esc_data, runs)
+        save_to_cache(filepath, all_esc_data, runs, poles)
     
     # Compute run stats (using cached data - FAST)
     stats = []
@@ -1529,6 +1567,7 @@ def main():
         
         print(f"\n{'='*55}")
         print(f"Current: {run_label} | ESC: [{esc_label}] | Filter: {filter_label} | Eff: {eff_unit_label}")
+        print(f"Config: {poles} Pole Pairs (Scale: {poles}/14.0 = {poles/14.0:.3f})")
         print(f"{'='*55}")
         print("[1] Plot ESC Basics (RPM, Volt, Curr, Temp)")
         print("[2] Plot Power (Total Current & Power)")
@@ -1541,6 +1580,7 @@ def main():
         print("[9] Export to CSV")
         print(f"[0] Adjust Low-Pass Filter (RC: {filter_label})")
         print(f"[e] Toggle Efficiency Unit")
+        print(f"[p] Configure Pole Pairs")
         print("[q] Quit")
         
         choice = input("> ").strip().lower()
@@ -1620,6 +1660,29 @@ def main():
             # Toggle efficiency unit
             efficiency_mode = 'rpm_w' if efficiency_mode == 'pct' else 'pct'
             print(f"Switched efficiency unit to: {'RPM/Watt' if efficiency_mode == 'rpm_w' else 'Motor Efficiency (%)'}")
+        elif choice == 'p':
+            try:
+                print(f"Current Configured Poles: {poles}")
+                val = input("Enter new pole count (e.g. 19 or 21): ").strip()
+                new_poles = int(val)
+                if new_poles < 2: raise ValueError
+                
+                poles = new_poles
+                print(f"Reloading data with {poles} pole pairs...")
+                
+                # Check cache for new config
+                if is_cache_valid(filepath, poles):
+                    all_esc_data, _ = load_from_cache(filepath, poles)
+                else:
+                    print("Parsing bin file for new config...")
+                    all_esc_data = load_esc_data(filepath, 0, 0, poles)
+                    save_to_cache(filepath, all_esc_data, runs, poles)
+                
+                # Reload current view
+                load_run(current_run_idx)
+                print(f"Configuration updated to {poles} poles.")
+            except:
+                print("Invalid input.")
         elif choice == 'q':
             print("Goodbye!")
             break
