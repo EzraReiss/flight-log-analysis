@@ -32,7 +32,7 @@ except ImportError:
 
 # Minimum current threshold for reliable sensor readings
 # Data below this value is excluded from efficiency/voltage sag calculations
-MIN_CURRENT_THRESHOLD = 20.0  # Amps (raised from 10A to exclude shutdown periods)
+MIN_CURRENT_THRESHOLD = 8.0  # Amps (raised from 10A to exclude shutdown periods)
 
 # Minimum throttle threshold for active motor data
 # Data below this PWM value indicates motor is ramping down/stopped
@@ -44,7 +44,7 @@ MIN_THROTTLE_THRESHOLD = 1400  # PWM value (typically 1000-2000 range)
 DEFAULT_FILTER_RC = 2.0
 
 # Cache directory (stored next to the bin file)
-CACHE_VERSION = "v6"  # Increment when cache format changes (v6 adds pole count to filename)
+CACHE_VERSION = "v8"  # Increment when cache format changes (v8 adds esc_channel_map to meta)
 
 
 def lowpass_filter(data, times, rc_constant):
@@ -75,37 +75,74 @@ def lowpass_filter(data, times, rc_constant):
 # Motor Specification Data (for benchmark comparison)
 # =============================================================================
 
-# MAD V62 PRO IPE 210KV with CF FLUXER 22.1x7.4 VTOL prop, AMPX 80A ESC, 12S
-# Source: Manufacturer datasheet
-MOTOR_SPEC = {
-    'name': 'MAD V62 PRO IPE 210KV (12S)',
-    'prop': 'CF FLUXER 22.1x7.4 VTOL',
-    'data': {
-        # Throttle %: [Voltage, Current, Input Power, Output Power, RPM, Efficiency %]
-        30:  [47.76, 3.62,  172.5,  128.0, 2662, 74.15],
-        35:  [47.76, 4.96,  236.2,  180.6, 3007, 76.4],
-        40:  [47.76, 6.88,  328.0,  256.8, 3375, 78.23],
-        45:  [47.72, 9.66,  460.5,  367.2, 3798, 79.69],
-        50:  [47.69, 12.97, 618.2,  498.6, 4192, 80.6],
-        55:  [47.68, 16.13, 768.4,  622.9, 4537, 81.02],
-        60:  [47.61, 20.52, 976.5,  763.2, 4834, 78.11],
-        65:  [47.63, 24.21, 1152.9, 910.9, 5118, 78.97],
-        70:  [47.52, 27.93, 1326.7, 1069.3, 5400, 80.56],
-        75:  [47.55, 33.46, 1590.3, 1240.2, 5647, 77.96],
-        80:  [47.47, 38.38, 1821.6, 1419.5, 5913, 77.9],
-        85:  [47.37, 45.41, 2150.5, 1635.4, 6181, 76.01],
-        90:  [47.34, 50.03, 2368.1, 1830.0, 6390, 77.24],
-        95:  [47.26, 58.14, 2747.5, 2016.1, 6611, 73.37],
-        100: [47.17, 59.3,  2846.4, 2058.2, 6793, 72.31],
+# Built-in specs. Keys are used by --motor or config "motor_spec".
+MOTOR_SPECS = {
+    # MAD V62 PRO IPE 210KV with CF FLUXER 22.1x7.4 VTOL prop, AMPX 80A ESC, 12S
+    # Source: Manufacturer datasheet
+    "mad_v62_12s": {
+        'name': 'MAD V62 PRO IPE 210KV (12S)',
+        'prop': 'CF FLUXER 22.1x7.4 VTOL',
+        'note': 'Spec at ~48V nominal',
+        'data': {
+            # Throttle %: [Voltage, Current, Input Power, Output Power, RPM, Efficiency %]
+            30:  [47.76, 3.62,  172.5,  128.0, 2662, 74.15],
+            35:  [47.76, 4.96,  236.2,  180.6, 3007, 76.4],
+            40:  [47.76, 6.88,  328.0,  256.8, 3375, 78.23],
+            45:  [47.72, 9.66,  460.5,  367.2, 3798, 79.69],
+            50:  [47.69, 12.97, 618.2,  498.6, 4192, 80.6],
+            55:  [47.68, 16.13, 768.4,  622.9, 4537, 81.02],
+            60:  [47.61, 20.52, 976.5,  763.2, 4834, 78.11],
+            65:  [47.63, 24.21, 1152.9, 910.9, 5118, 78.97],
+            70:  [47.52, 27.93, 1326.7, 1069.3, 5400, 80.56],
+            75:  [47.55, 33.46, 1590.3, 1240.2, 5647, 77.96],
+            80:  [47.47, 38.38, 1821.6, 1419.5, 5913, 77.9],
+            85:  [47.37, 45.41, 2150.5, 1635.4, 6181, 76.01],
+            90:  [47.34, 50.03, 2368.1, 1830.0, 6390, 77.24],
+            95:  [47.26, 58.14, 2747.5, 2016.1, 6611, 73.37],
+            100: [47.17, 59.3,  2846.4, 2058.2, 6793, 72.31],
+        }
+    },
+    # MAD V122 IPE 45KV with CB2 42x14 MATT prop, AMPX 200A ESC (12-24S), 24S spec
+    "mad_v122_45kv_24s": {
+        'name': 'MAD V122 IPE 45KV (24S reference)',
+        'prop': 'CB2 42x14 MATT',
+        'note': 'Spec at ~96V nominal (24S table)',
+        'data': {
+            # Throttle %: [Voltage, Current, Input Power, Output Power, RPM, Efficiency %]
+            30:  [98.28, 3.81,   374.4,  277.8, 1310, 74.2],
+            35:  [98.29, 5.59,   549.4,  427.9, 1510, 77.9],
+            40:  [98.26, 7.53,   739.9,  598.5, 1689, 80.9],
+            45:  [98.27, 10.00,  982.7,  808.3, 1877, 82.3],
+            50:  [98.24, 13.32, 1308.6, 1110.2, 2078, 84.8],
+            55:  [98.20, 18.28, 1795.1, 1520.2, 2301, 84.7],
+            60:  [98.13, 23.86, 2341.4, 2030.6, 2517, 86.7],
+            65:  [98.10, 30.33, 2975.4, 2562.2, 2712, 86.1],
+            70:  [98.07, 35.35, 3466.8, 3105.8, 2898, 89.6],
+            75:  [97.99, 44.72, 4382.1, 3828.2, 3080, 87.4],
+            80:  [97.90, 54.94, 5378.6, 4679.4, 3271, 87.0],
+            85:  [97.80, 66.30, 6484.1, 5595.8, 3455, 86.3],
+            90:  [97.74, 77.16, 7541.6, 6350.0, 3639, 84.2],
+            95:  [97.63, 90.73, 8858.0, 7245.8, 3812, 81.8],
+            100: [97.43, 111.62,10875.1, 8493.5, 4029, 78.1],
+        }
     }
 }
 
+DEFAULT_MOTOR_SPEC_KEY = "mad_v62_12s"
+
+def get_motor_spec(spec_key):
+    """Return a motor spec dict by key, or exit with an error."""
+    if spec_key in MOTOR_SPECS:
+        return MOTOR_SPECS[spec_key]
+    print(f"Error: Unknown motor spec '{spec_key}'. Available: {', '.join(sorted(MOTOR_SPECS.keys()))}")
+    sys.exit(1)
+
 # Calculate propeller constant k from datasheet: P_out = k × RPM³
 # For propellers: Output Power is proportional to RPM cubed
-def calculate_propeller_constant():
+def calculate_propeller_constant(spec):
     """Derive propeller constant k from datasheet where P_out = k × RPM³."""
     k_values = []
-    for throttle, data in MOTOR_SPEC['data'].items():
+    for _, data in spec['data'].items():
         output_power = data[3]  # Output Power (W)
         rpm = data[4]           # RPM
         if rpm > 0:
@@ -113,34 +150,144 @@ def calculate_propeller_constant():
             k_values.append(k)
     return sum(k_values) / len(k_values) if k_values else 0
 
-# Propeller constant for CF FLUXER 22.1x7.4 VTOL prop
-# P_output (W) = PROP_K * RPM^3
-PROP_K = calculate_propeller_constant()
-
-def estimate_output_power(rpm):
-    """Estimate propeller output power from RPM using cubic relationship.
-    
-    For propellers: P_out = k × RPM³
-    Returns estimated output power in Watts.
-    """
+def estimate_output_power(rpm, prop_k):
+    """Estimate propeller output power from RPM using cubic relationship."""
     if rpm <= 0:
         return 0
-    return PROP_K * (rpm ** 3)
+    return prop_k * (rpm ** 3)
 
-def calculate_motor_efficiency(rpm, input_power):
+def calculate_motor_efficiency(rpm, input_power, prop_k):
     """Calculate motor efficiency as Output Power / Input Power.
     
     Uses the propeller cubic relationship to estimate output power from RPM.
     Returns efficiency as percentage, or None if invalid.
-    
-    Note: Values >100% indicate the propeller constant may need calibration
-    for the specific test conditions (voltage, temperature, etc.)
     """
     if input_power <= 0 or rpm <= 0:
         return None
-    output_power = estimate_output_power(rpm)
+    output_power = estimate_output_power(rpm, prop_k)
     efficiency = (output_power / input_power) * 100
     return efficiency
+
+
+def load_json_config(config_path):
+    """Load a JSON config file for analysis settings."""
+    if not config_path:
+        return {}
+    if not os.path.exists(config_path):
+        print(f"Error: Config file not found: {config_path}")
+        sys.exit(1)
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error reading config: {e}")
+        sys.exit(1)
+
+
+def normalize_esc_channel_map(value):
+    """Normalize ESC channel map to a dict of int ESC -> int channel (1-8)."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return {i: int(v) for i, v in enumerate(value)}
+    if isinstance(value, dict):
+        return {int(k): int(v) for k, v in value.items()}
+    return None
+
+
+def esc_channel_map_to_meta(esc_channel_map):
+    """Convert ESC channel map to JSON-friendly dict with string keys."""
+    if not esc_channel_map:
+        return None
+    return {str(k): int(v) for k, v in esc_channel_map.items()}
+
+
+def normalize_current_scale_rules(rules, pwm_min=1000, pwm_max=2000):
+    """Normalize current scale rules with PWM thresholds.
+    
+    Rules can use min/max_throttle_pwm or min/max_throttle_pct.
+    """
+    if not rules:
+        return []
+    normalized = []
+    for rule in rules:
+        try:
+            scale = float(rule.get('scale', 1.0))
+        except Exception:
+            continue
+
+        min_pwm = rule.get('min_throttle_pwm')
+        max_pwm = rule.get('max_throttle_pwm')
+        min_pct = rule.get('min_throttle_pct')
+        max_pct = rule.get('max_throttle_pct')
+
+        if min_pwm is None and min_pct is not None:
+            min_pwm = pwm_min + (pwm_max - pwm_min) * (float(min_pct) / 100.0)
+        if max_pwm is None and max_pct is not None:
+            max_pwm = pwm_min + (pwm_max - pwm_min) * (float(max_pct) / 100.0)
+
+        normalized.append({
+            'scale': scale,
+            'min_pwm': float(min_pwm) if min_pwm is not None else None,
+            'max_pwm': float(max_pwm) if max_pwm is not None else None
+        })
+    return normalized
+
+
+def get_current_scale(max_throttle_pwm, rules):
+    """Return the scale factor for a given max throttle PWM."""
+    if not rules:
+        return 1.0
+    scale = 1.0
+    for rule in rules:
+        min_pwm = rule.get('min_pwm')
+        max_pwm = rule.get('max_pwm')
+        if min_pwm is not None and max_throttle_pwm < min_pwm:
+            continue
+        if max_pwm is not None and max_throttle_pwm > max_pwm:
+            continue
+        scale = rule.get('scale', 1.0)
+    return scale
+
+
+def describe_current_scale_rules(rules):
+    """Human-readable summary of current scale rules."""
+    if not rules:
+        return "None"
+    parts = []
+    for rule in rules:
+        conds = []
+        if rule.get('min_pwm') is not None:
+            conds.append(f">={rule['min_pwm']:.0f}")
+        if rule.get('max_pwm') is not None:
+            conds.append(f"<={rule['max_pwm']:.0f}")
+        cond = " & ".join(conds) if conds else "any"
+        parts.append(f"{cond}: x{rule.get('scale', 1.0):g}")
+    return "; ".join(parts)
+
+
+def build_max_throttle_series(esc_data, ref_times):
+    """Build a max-throttle series aligned to the reference time base."""
+    max_throttle = [0.0] * len(ref_times)
+    for inst, data in esc_data.items():
+        throttle = data.get('throttle', [])
+        for j in range(min(len(throttle), len(ref_times))):
+            if throttle[j] > max_throttle[j]:
+                max_throttle[j] = throttle[j]
+    return max_throttle
+
+
+def build_active_esc_count_series(esc_data, ref_times, throttle_threshold):
+    """Count active ESCs per time index based on per-ESC throttle."""
+    counts = []
+    for j in range(len(ref_times)):
+        cnt = 0
+        for _, data in esc_data.items():
+            throttle = data.get('throttle', [])
+            if j < len(throttle) and throttle[j] >= throttle_threshold:
+                cnt += 1
+        counts.append(cnt)
+    return counts
 
 # =============================================================================
 # Caching Functions
@@ -154,17 +301,36 @@ def get_output_dir(filepath):
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
 
+def get_poles_cache_key(poles):
+    """Generate a filename suffix string for the pole configuration."""
+    if isinstance(poles, int):
+        return f"p{poles}"
+    elif isinstance(poles, str):
+        # Should be int if simple, but handle str just in case
+        return f"p{poles}"
+    elif isinstance(poles, dict):
+        # Create a deterministic string for the dict
+        # e.g. p_mixed_HASH
+        import hashlib
+        # Sort items to ensure stability
+        s = json.dumps(dict(sorted(poles.items())), sort_keys=True)
+        h = hashlib.md5(s.encode()).hexdigest()[:8]
+        return f"p_mixed_{h}"
+    return "p_unknown"
+
 def get_cache_path(filepath, poles):
     """Get the cache file path for a given bin file and pole config."""
     output_dir = get_output_dir(filepath)
-    return os.path.join(output_dir, f"esc_data_cache_p{poles}.csv")
+    suffix = get_poles_cache_key(poles)
+    return os.path.join(output_dir, f"esc_data_cache_{suffix}.csv")
 
 def get_cache_meta_path(filepath, poles):
     """Get the cache metadata file path."""
     output_dir = get_output_dir(filepath)
-    return os.path.join(output_dir, f"cache_meta_p{poles}.json")
+    suffix = get_poles_cache_key(poles)
+    return os.path.join(output_dir, f"cache_meta_{suffix}.json")
 
-def is_cache_valid(filepath, poles):
+def is_cache_valid(filepath, poles, esc_channel_map):
     """Check if cached data exists and is still valid."""
     cache_path = get_cache_path(filepath, poles)
     meta_path = get_cache_meta_path(filepath, poles)
@@ -184,6 +350,11 @@ def is_cache_valid(filepath, poles):
         # Check pole count matches
         if meta.get('poles') != poles:
             print(f"Cache pole count mismatch ({meta.get('poles')} vs {poles}), reparsing...")
+            return False
+
+        # Check ESC channel map matches
+        if meta.get('esc_channel_map') != esc_channel_map_to_meta(esc_channel_map):
+            print("Cache ESC channel map mismatch, reparsing...")
             return False
         
         # Check file modification time
@@ -244,7 +415,7 @@ def load_from_cache(filepath, poles):
         return None, None
 
 
-def save_to_cache(filepath, esc_data, runs, poles):
+def save_to_cache(filepath, esc_data, runs, poles, esc_channel_map):
     """Save ESC data and runs to cache (CSV format for easy viewing)."""
     cache_path = get_cache_path(filepath, poles)
     meta_path = get_cache_meta_path(filepath, poles)
@@ -278,7 +449,8 @@ def save_to_cache(filepath, esc_data, runs, poles):
             'bin_size': os.path.getsize(filepath),
             'runs': runs,
             'esc_count': len(esc_data),
-            'poles': poles
+            'poles': poles,
+            'esc_channel_map': esc_channel_map_to_meta(esc_channel_map)
         }
         
         with open(meta_path, 'w') as f:
@@ -348,13 +520,14 @@ def detect_runs(filepath, throttle_threshold=1200, cooldown_sec=10.0):
     return runs
 
 
-def load_esc_data(filepath, start_us=0, end_us=0, poles=19):
+def load_esc_data(filepath, start_us=0, end_us=0, poles=19, esc_channel_map=None):
     """Load ESC data within optional time range. Returns dict by instance.
     
     Args:
         filepath: Path to .BIN file
         start_us, end_us: Time range (0=all)
         poles: Configured pole pairs in ESC (used to correct RPM)
+        esc_channel_map: Optional dict mapping ESC instance -> RCOU channel (1-8)
     """
     esc_data = defaultdict(lambda: {'time_us': [], 'time': [], 'rpm': [], 'volt': [], 'curr': [], 'temp': [], 'throttle': []})
     
@@ -399,10 +572,9 @@ def load_esc_data(filepath, start_us=0, end_us=0, poles=19):
     throttle_times = sorted(throttle_lookup.keys())
     
     def get_throttle(time_us, esc_instance):
-        """Find closest MAX throttle value for given timestamp.
+        """Find closest throttle value for given timestamp.
         
-        Uses max throttle across all channels since ESC instance may not map
-        directly to RCOU channel numbers (varies by frame configuration).
+        Uses per-ESC channel map if provided; otherwise uses max throttle.
         """
         if not throttle_times:
             return 0
@@ -419,7 +591,11 @@ def load_esc_data(filepath, start_us=0, end_us=0, poles=19):
             t_after = throttle_times[idx]
             t = t_before if (time_us - t_before) < (t_after - time_us) else t_after
         
-        # Return max throttle across all channels
+        # Use per-ESC channel mapping if provided, else max throttle
+        if esc_channel_map and esc_instance in esc_channel_map:
+            ch = esc_channel_map.get(esc_instance)
+            if ch is not None and 1 <= int(ch) <= 8:
+                return throttle_lookup.get(t, {}).get(int(ch) - 1, 0)
         return throttle_lookup.get(t, {}).get('max', 0)
     
     # Second pass: read ESC messages with throttle lookup
@@ -446,17 +622,16 @@ def load_esc_data(filepath, start_us=0, end_us=0, poles=19):
             esc_data[i]['time_us'].append(msg.TimeUS)
             esc_data[i]['time'].append(t_sec)
             # RPM Correction: Motor has 14 pole pairs.
-            # ESC RPM reading follows: RPM_read = RPM_real * (poles_configured / poles_real)
-            # So: RPM_real = RPM_read * (poles_real / poles_configured)
-            # Wait, user said: "RPM we were reading was actually 19/14*the current ESC rpm"
-            # This implies the ESC was configured for 19, but motor has 14.
-            # So the ESC *thought* it was 19.
-            # If ESC thinks 19, it counts commutations for 19 poles to get 1 revolution.
-            # Since motor only has 14, it completes a revolution faster for same commutations?
-            
             # User logic: "reading was actually 19/14 * current ESC rpm"
             # So we multiply by (Configured / Real).
-            rpm_scale = float(poles) / 14.0
+            
+            # Determine configured pole count for this instance
+            if isinstance(poles, dict):
+                p_config = poles.get(i, 19) # Default to 19 if not specified
+            else:
+                p_config = int(poles)
+                
+            rpm_scale = float(p_config) / 14.0
             esc_data[i]['rpm'].append(msg.RPM * rpm_scale)
             
             esc_data[i]['volt'].append(msg.Volt)
@@ -469,13 +644,19 @@ def load_esc_data(filepath, start_us=0, end_us=0, poles=19):
     return esc_data
 
 
-def compute_derived_metrics(esc_data, rc_filter=0):
+def compute_derived_metrics(esc_data, rc_filter=0, prop_k=None, current_scale_rules=None):
     """Compute power, efficiency, and aggregate metrics.
     
     Args:
         esc_data: Dict of ESC data by instance
         rc_filter: Low-pass filter RC constant (0 = no filtering)
+        prop_k: Propeller constant for efficiency calculation
+        current_scale_rules: Optional list of current scale rules
     """
+    if prop_k is None:
+        prop_k = calculate_propeller_constant(get_motor_spec(DEFAULT_MOTOR_SPEC_KEY))
+    current_scale_rules = current_scale_rules or []
+
     derived = {
         'per_esc': {},  # Power and efficiency per ESC
         'total': {'time': [], 'curr': [], 'power': []}
@@ -498,6 +679,11 @@ def compute_derived_metrics(esc_data, rc_filter=0):
     
     ref_times = esc_data[ref_instance]['time']
     derived['total']['time'] = ref_times
+
+    max_throttle = build_max_throttle_series(esc_data, ref_times)
+    use_scale_rules = bool(current_scale_rules) and max(max_throttle) > 0
+    if current_scale_rules and not use_scale_rules:
+        print("Warning: Current scale rules configured but throttle data is missing. Skipping scaling.")
     
     # Initialize totals
     total_curr = [0.0] * len(ref_times)
@@ -519,11 +705,17 @@ def compute_derived_metrics(esc_data, rc_filter=0):
         power = []
         efficiency = []
         efficiency_rpm_w = []
+        curr_scaled = []
         
         for j in range(n):
             v = volt_filtered[j]
-            i = curr_filtered[j]
+            i_raw = curr_filtered[j]
             rpm = data['rpm'][j]
+
+            throttle_pwm = max_throttle[j] if j < len(max_throttle) else (max_throttle[-1] if max_throttle else 0)
+            scale = get_current_scale(throttle_pwm, current_scale_rules) if use_scale_rules else 1.0
+            i = i_raw * scale
+            curr_scaled.append(i)
             
             p = v * i  # Input Power (Watts)
             power.append(p)
@@ -532,7 +724,7 @@ def compute_derived_metrics(esc_data, rc_filter=0):
             # Uses propeller cubic relationship: P_out = k × RPM³
             # Filter out low current data (sensor inaccurate below threshold)
             if i >= MIN_CURRENT_THRESHOLD and p > 1.0:
-                eff_pct = calculate_motor_efficiency(rpm, p)
+                eff_pct = calculate_motor_efficiency(rpm, p, prop_k)
                 eff_rpm_w = rpm / p if p > 0 else 0
             else:
                 eff_pct = None  # Mark as invalid/unreliable
@@ -552,7 +744,7 @@ def compute_derived_metrics(esc_data, rc_filter=0):
             'efficiency_pct': efficiency,
             'efficiency_rpm_w': efficiency_rpm_w,
             'volt_filtered': volt_filtered,
-            'curr_filtered': curr_filtered
+            'curr_filtered': curr_scaled
         }
     
     derived['total']['curr'] = total_curr
@@ -561,7 +753,7 @@ def compute_derived_metrics(esc_data, rc_filter=0):
     return derived
 
 
-def analyze_runs_from_cache(runs, all_esc_data):
+def analyze_runs_from_cache(runs, all_esc_data, prop_k=None, current_scale_rules=None):
     """Compute summary stats for each run using cached data (fast).
     
     Args:
@@ -572,7 +764,7 @@ def analyze_runs_from_cache(runs, all_esc_data):
     
     for idx, (start, end) in enumerate(runs):
         # Filter cached data for this run's time range
-        run_data = defaultdict(lambda: {'time_us': [], 'time': [], 'rpm': [], 'volt': [], 'curr': [], 'temp': []})
+        run_data = defaultdict(lambda: {'time_us': [], 'time': [], 'rpm': [], 'volt': [], 'curr': [], 'temp': [], 'throttle': []})
         
         first_time = None
         for inst, data in all_esc_data.items():
@@ -594,8 +786,9 @@ def analyze_runs_from_cache(runs, all_esc_data):
                 run_data[inst]['volt'].append(data['volt'][i])
                 run_data[inst]['curr'].append(data['curr'][i])
                 run_data[inst]['temp'].append(data['temp'][i])
+                run_data[inst]['throttle'].append(data['throttle'][i] if 'throttle' in data and i < len(data['throttle']) else 0)
         
-        derived = compute_derived_metrics(run_data)
+        derived = compute_derived_metrics(run_data, prop_k=prop_k, current_scale_rules=current_scale_rules)
         
         duration = (end - start) / 1e6 if (end and start) else 0
         max_rpm = max_curr = max_temp = avg_eff = total_energy = 0
@@ -604,8 +797,9 @@ def analyze_runs_from_cache(runs, all_esc_data):
             d = run_data[inst]
             if d['rpm']:
                 max_rpm = max(max_rpm, max(d['rpm']))
-            if d['curr']:
-                max_curr = max(max_curr, max(d['curr']))
+            curr_vals = derived['per_esc'].get(inst, {}).get('curr_filtered', d.get('curr', []))
+            if curr_vals:
+                max_curr = max(max_curr, max(curr_vals))
             if d['temp']:
                 max_temp = max(max_temp, max(d['temp']))
         
@@ -652,7 +846,7 @@ def combine_runs_data(runs, all_esc_data, current_threshold=MIN_CURRENT_THRESHOL
         combined_esc_data: Dict with continuous time axis, run boundaries marked
         run_boundaries: List of cumulative times where each run ends
     """
-    combined = defaultdict(lambda: {'time': [], 'rpm': [], 'volt': [], 'curr': [], 'temp': []})
+    combined = defaultdict(lambda: {'time': [], 'rpm': [], 'volt': [], 'curr': [], 'temp': [], 'throttle': []})
     run_boundaries = []
     cumulative_time = 0.0
     
@@ -691,6 +885,7 @@ def combine_runs_data(runs, all_esc_data, current_threshold=MIN_CURRENT_THRESHOL
                 combined[inst]['volt'].append(data['volt'][i])
                 combined[inst]['curr'].append(data['curr'][i])
                 combined[inst]['temp'].append(data['temp'][i])
+                combined[inst]['throttle'].append(throttle)
                 
                 run_duration = max(run_duration, t_relative)
                 run_data_added = True
@@ -945,7 +1140,7 @@ def plot_efficiency(esc_data, derived, active_escs, title_prefix, save_path, mod
     plt.show()
 
 
-def plot_voltage_sag(esc_data, derived, active_escs, title_prefix, save_path, esc_count=4):
+def plot_voltage_sag(esc_data, derived, active_escs, title_prefix, save_path, esc_count=4, esc_count_series=None):
     """Scatter plot of Voltage vs TOTAL Current, colored by avg Temperature.
     
     Uses total current (sum of all ESCs) since battery voltage sag is a function
@@ -955,10 +1150,21 @@ def plot_voltage_sag(esc_data, derived, active_escs, title_prefix, save_path, es
         esc_count: Number of ESCs in the system (for threshold calculation)
     """
     min_total_current = MIN_CURRENT_THRESHOLD * esc_count
+    if esc_count_series:
+        valid_counts = [c for c in esc_count_series if c > 0]
+        if valid_counts:
+            min_count = min(valid_counts)
+            max_count = max(valid_counts)
+            count_label = f"{min_count}-{max_count}" if min_count != max_count else f"{min_count}"
+            min_total_current = MIN_CURRENT_THRESHOLD * min_count
+        else:
+            count_label = f"{esc_count}"
+    else:
+        count_label = f"{esc_count}"
     
     setup_style()
     fig, ax = plt.subplots(figsize=(10, 7))
-    fig.suptitle(f'{title_prefix} - Voltage Sag Analysis [Total Current >= {min_total_current}A]', fontsize=14)
+    fig.suptitle(f'{title_prefix} - Voltage Sag Analysis [Total Current >= {min_total_current}A (ESCs: {count_label})]', fontsize=14)
     
     # Use total current from derived metrics and average voltage
     total_curr = derived['total']['curr']
@@ -989,8 +1195,12 @@ def plot_voltage_sag(esc_data, derived, active_escs, title_prefix, save_path, es
         
         if volts and j < len(total_curr):
             curr = total_curr[j]
+            count = esc_count
+            if esc_count_series and j < len(esc_count_series) and esc_count_series[j] > 0:
+                count = esc_count_series[j]
+            min_total_current_j = MIN_CURRENT_THRESHOLD * count
             # Filter by total current threshold (MIN_CURRENT_THRESHOLD * ESC count)
-            if curr >= min_total_current:
+            if curr >= min_total_current_j:
                 avg_volt.append(sum(volts) / len(volts))
                 avg_temp.append(sum(temps) / len(temps))
                 valid_curr.append(curr)
@@ -1046,7 +1256,7 @@ def plot_voltage_sag(esc_data, derived, active_escs, title_prefix, save_path, es
     plt.show()
 
 
-def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path, esc_count, mode='pct'):
+def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path, esc_count, mode='pct', esc_count_series=None):
     """Comprehensive system analysis showing voltage, current, power, and efficiency relationships.
     
     Creates 4 subplots:
@@ -1059,6 +1269,14 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
         mode: 'pct' for Motor Efficiency (%), 'rpm_w' for RPM/Watt
     """
     min_total_current = MIN_CURRENT_THRESHOLD * esc_count
+    count_label = f"{esc_count}"
+    if esc_count_series:
+        valid_counts = [c for c in esc_count_series if c > 0]
+        if valid_counts:
+            min_count = min(valid_counts)
+            max_count = max(valid_counts)
+            count_label = f"{min_count}-{max_count}" if min_count != max_count else f"{min_count}"
+            min_total_current = MIN_CURRENT_THRESHOLD * min_count
     
     setup_style()
     
@@ -1066,7 +1284,7 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
     data_key = 'efficiency_pct' if mode == 'pct' else 'efficiency_rpm_w'
     
     fig, axs = plt.subplots(2, 2, figsize=(14, 11))
-    fig.suptitle(f'{title_prefix} - System Analysis [Current >= {min_total_current:.0f}A total]', fontsize=14)
+    fig.suptitle(f'{title_prefix} - System Analysis [Current >= {min_total_current:.0f}A total (ESCs: {count_label})]', fontsize=14)
     
     # Collect valid data points (above current threshold)
     all_volts = []
@@ -1081,7 +1299,10 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
             continue
         
         for j in range(len(esc_data[i]['curr'])):
-            curr = esc_data[i]['curr'][j]
+            curr_list = derived['per_esc'][i].get('curr_filtered', esc_data[i]['curr'])
+            if j >= len(curr_list):
+                continue
+            curr = curr_list[j]
             if curr < MIN_CURRENT_THRESHOLD:
                 continue
             
@@ -1219,7 +1440,7 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
     plt.show()
 
 
-def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path, mode='pct'):
+def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path, motor_spec, mode='pct'):
     """Compare measured data against motor specification datasheet.
     
     Creates 2 subplots:
@@ -1238,7 +1459,7 @@ def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path, mode
     fig.suptitle(f'{title_prefix} - Motor Benchmark [Current >= {MIN_CURRENT_THRESHOLD}A]', fontsize=14)
     
     # Extract spec data for curves
-    spec_data = MOTOR_SPEC['data']
+    spec_data = motor_spec['data']
     spec_power = [spec_data[t][2] for t in sorted(spec_data.keys())]  # Input Power
     spec_rpm = [spec_data[t][4] for t in sorted(spec_data.keys())]    # RPM
     spec_eff = [spec_data[t][5] for t in sorted(spec_data.keys())]    # Efficiency %
@@ -1269,7 +1490,7 @@ def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path, mode
                     color='gray', alpha=0.25, label='±10%')
     
     # Plot spec curve
-    ax.plot(power_range, rpm_curve, 'k-', linewidth=2.5, label=f'Spec: {MOTOR_SPEC["name"]}', alpha=0.8)
+    ax.plot(power_range, rpm_curve, 'k-', linewidth=2.5, label=f'Spec: {motor_spec["name"]}', alpha=0.8)
     ax.scatter(spec_power, spec_rpm, color='black', s=40, zorder=5, marker='s', label='Spec data points')
     
     # Plot measured data for each ESC
@@ -1279,7 +1500,7 @@ def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path, mode
             rpm = esc_data[i]['rpm']
             
             # Filter for reliable readings (above current threshold)
-            curr = esc_data[i]['curr']
+            curr = derived['per_esc'][i].get('curr_filtered', esc_data[i]['curr'])
             valid_power = [p for p, c in zip(power, curr) if c >= MIN_CURRENT_THRESHOLD]
             valid_rpm = [r for r, c in zip(rpm, curr) if c >= MIN_CURRENT_THRESHOLD]
             
@@ -1298,7 +1519,7 @@ def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path, mode
     ax = axs[1]
     
     # Plot spec efficiency curve
-    ax.plot(power_range, eff_curve, 'k-', linewidth=2.5, label=f'Spec: {MOTOR_SPEC["name"]}', alpha=0.8)
+    ax.plot(power_range, eff_curve, 'k-', linewidth=2.5, label=f'Spec: {motor_spec["name"]}', alpha=0.8)
     if mode == 'pct':
         ax.scatter(spec_power, spec_eff, color='black', s=40, zorder=5, marker='s', label='Spec data points')
     else:
@@ -1315,7 +1536,7 @@ def plot_benchmark(esc_data, derived, active_escs, title_prefix, save_path, mode
             else:
                 effs = derived['per_esc'][i][data_key]
                 
-            curr = esc_data[i]['curr']
+            curr = derived['per_esc'][i].get('curr_filtered', esc_data[i]['curr'])
             
             # Filter for reliable readings
             valid_power = []
@@ -1373,7 +1594,8 @@ def export_csv(esc_data, derived, filepath):
                 deriv = derived['per_esc'].get(i, {})
                 row.append(d['rpm'][j] if j < len(d['rpm']) else '')
                 row.append(d['volt'][j] if j < len(d['volt']) else '')
-                row.append(d['curr'][j] if j < len(d['curr']) else '')
+                curr_vals = deriv.get('curr_filtered', d.get('curr', []))
+                row.append(curr_vals[j] if j < len(curr_vals) else '')
                 row.append(d['temp'][j] if j < len(d['temp']) else '')
                 row.append(deriv.get('power', [])[j] if j < len(deriv.get('power', [])) else '')
                 row.append(deriv.get('efficiency', [])[j] if j < len(deriv.get('efficiency', [])) else '')
@@ -1401,9 +1623,65 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description='Analyze ArduPilot .BIN log for ESC data')
     parser.add_argument('filepath', nargs='?', help='Path to .BIN file')
-    parser.add_argument('--poles', type=int, default=19, help='Configured ESC pole pairs (default: 19)')
+    # Use nargs='+' to consume multiple arguments if user types spaces (e.g. 19, 21)
+    parser.add_argument('--poles', nargs='+', default=["19"], help='Configured ESC pole pairs (default: 19, or list "19,21")')
+    parser.add_argument('--config', help='Path to JSON config file with analysis overrides')
+    parser.add_argument('--motor', help='Motor spec key (built-in)')
     args = parser.parse_args()
+
+    config = load_json_config(args.config) if args.config else {}
+    motor_key = args.motor or config.get('motor_spec') or DEFAULT_MOTOR_SPEC_KEY
+    motor_spec = get_motor_spec(motor_key)
+    prop_k = calculate_propeller_constant(motor_spec)
+
+    esc_channel_map = normalize_esc_channel_map(config.get('esc_channel_map'))
+    throttle_pwm_min = int(config.get('throttle_pwm_min', 1000))
+    throttle_pwm_max = int(config.get('throttle_pwm_max', 2000))
+    current_scale_rules = normalize_current_scale_rules(
+        config.get('current_scale_rules', []),
+        pwm_min=throttle_pwm_min,
+        pwm_max=throttle_pwm_max
+    )
+    esc_count_mode = str(config.get('esc_count_mode', 'fixed')).lower()
+    esc_count_fixed = config.get('esc_count_fixed')
+    active_esc_throttle_pwm = int(config.get('active_esc_throttle_pwm', MIN_THROTTLE_THRESHOLD))
+    if esc_count_mode not in ['fixed', 'throttle']:
+        print(f"Warning: Unknown esc_count_mode '{esc_count_mode}', defaulting to fixed.")
+        esc_count_mode = 'fixed'
     
+    # Helper to parse poles string to dict or int
+    def parse_poles(p_list):
+        # Join list into single string if multiple parts
+        if isinstance(p_list, list):
+            p_str = " ".join(p_list)
+        else:
+            p_str = str(p_list)
+            
+        p_str = p_str.strip().strip('"').strip("'")
+        
+        # Replace spaces with commas if needed, or just handle commas
+        # If user typed "19 21", p_str is "19 21". Split by space.
+        # If user typed "19, 21", p_str is "19, 21". Split by comma.
+        
+        parts = []
+        if ',' in p_str:
+            parts = [x.strip() for x in p_str.split(',') if x.strip()]
+        else:
+            parts = p_str.split()
+            
+        try:
+            # Try to convert all parts to int
+            int_parts = [int(x) for x in parts]
+        except:
+             print(f"Error parsing poles: {p_str}")
+             sys.exit(1)
+             
+        if len(int_parts) == 1:
+            return int_parts[0]
+        else:
+            # Return dict: {0: p0, 1: p1, ...}
+            return {i: p for i, p in enumerate(int_parts)}
+
     if not args.filepath:
         # Fallback for drag-and-drop or simple run
         if len(sys.argv) > 1 and not sys.argv[1].startswith('-'):
@@ -1414,7 +1692,7 @@ def main():
             sys.exit(1)
     else:
         filepath = args.filepath.strip().strip('"').strip("'")
-        poles = args.poles
+        poles = parse_poles(args.poles)
     
     if not os.path.exists(filepath):
         print(f"Error: File not found: {filepath}")
@@ -1424,13 +1702,24 @@ def main():
     print(f"ESC Analysis Tool")
     print(f"File: {os.path.basename(filepath)}")
     print(f"Configured ESC Pole Pairs: {poles} (Scaling RPM by {poles}/14.0)")
+    print(f"Motor Spec: {motor_spec['name']}")
+    if motor_spec.get('note'):
+        print(f"Spec Note: {motor_spec['note']}")
+    if current_scale_rules:
+        print(f"Current Scaling: {describe_current_scale_rules(current_scale_rules)}")
+    if esc_count_mode == 'throttle':
+        print(f"Active ESC Count: throttle >= {active_esc_throttle_pwm} PWM")
+        if not esc_channel_map:
+            print("Warning: No esc_channel_map set; active ESC counts may be inaccurate.")
+    elif esc_count_fixed is not None:
+        print(f"Active ESC Count: fixed {int(esc_count_fixed)}")
     print(f"{'='*50}")
     
     # Try to load from cache first
     all_esc_data = None
     runs = None
     
-    if is_cache_valid(filepath, poles):
+    if is_cache_valid(filepath, poles, esc_channel_map):
         all_esc_data, runs = load_from_cache(filepath, poles)
     
     # If cache miss or invalid, parse the full file
@@ -1447,16 +1736,16 @@ def main():
         
         # Load ALL ESC data from full file
         print("Loading all ESC data...")
-        all_esc_data = load_esc_data(filepath, 0, 0, poles)
+        all_esc_data = load_esc_data(filepath, 0, 0, poles, esc_channel_map)
         
         # Save to cache for next time
-        save_to_cache(filepath, all_esc_data, runs, poles)
+        save_to_cache(filepath, all_esc_data, runs, poles, esc_channel_map)
     
     # Compute run stats (using cached data - FAST)
     stats = []
     if runs and runs[0] != (0, 0):
         print("Computing run stats...")
-        stats = analyze_runs_from_cache(runs, all_esc_data)
+        stats = analyze_runs_from_cache(runs, all_esc_data, prop_k=prop_k, current_scale_rules=current_scale_rules)
         print_run_table(stats)
     else:
         print("No runs detected. Will analyze full log.")
@@ -1465,6 +1754,8 @@ def main():
     current_run_idx = None
     active_escs = []  # Will be auto-detected from data
     detected_esc_count = 0  # Track how many ESCs are in the log
+    esc_count_override = None
+    esc_count_series = None
     esc_data = {}  # Current run's data (filtered from all_esc_data)
     derived = {}
     filter_rc = DEFAULT_FILTER_RC  # Low-pass filter RC constant (adjustable)
@@ -1472,7 +1763,7 @@ def main():
     
     def filter_data_for_run(start_us, end_us):
         """Filter all_esc_data to just the specified time range."""
-        filtered = defaultdict(lambda: {'time_us': [], 'time': [], 'rpm': [], 'volt': [], 'curr': [], 'temp': []})
+        filtered = defaultdict(lambda: {'time_us': [], 'time': [], 'rpm': [], 'volt': [], 'curr': [], 'temp': [], 'throttle': []})
         
         for inst, data in all_esc_data.items():
             first_time = data['time_us'][0] if data['time_us'] else 0
@@ -1493,11 +1784,13 @@ def main():
                 filtered[inst]['volt'].append(data['volt'][i])
                 filtered[inst]['curr'].append(data['curr'][i])
                 filtered[inst]['temp'].append(data['temp'][i])
+                filtered[inst]['throttle'].append(data['throttle'][i] if 'throttle' in data and i < len(data['throttle']) else 0)
         
         return filtered
     
     def load_run(idx):
         nonlocal esc_data, derived, current_run_idx, active_escs, detected_esc_count, filter_rc
+        nonlocal esc_count_override, esc_count_series
         
         if idx == 'combined':
             # Combined runs mode - stitch all runs together, filtering <10A data
@@ -1523,12 +1816,24 @@ def main():
         
         # Compute derived metrics for whatever data was loaded
         derived.clear()
-        derived.update(compute_derived_metrics(esc_data, filter_rc))
+        derived.update(compute_derived_metrics(esc_data, filter_rc, prop_k=prop_k, current_scale_rules=current_scale_rules))
         
         # Auto-detect ESCs from loaded data
         detected_escs = sorted(esc_data.keys())
         detected_esc_count = len(detected_escs)
         active_escs = detected_escs.copy()
+
+        # Effective ESC count (fixed or throttle-based)
+        esc_count_override = detected_esc_count
+        esc_count_series = None
+        if esc_count_mode == 'fixed':
+            if esc_count_fixed is not None:
+                esc_count_override = int(esc_count_fixed)
+        elif esc_count_mode == 'throttle':
+            esc_count_series = build_active_esc_count_series(esc_data, derived['total']['time'], active_esc_throttle_pwm)
+            if not esc_count_series or max(esc_count_series) == 0:
+                esc_count_series = None
+                print("Warning: Active ESC count requested but throttle data is missing. Using detected ESC count.")
         
         print(f"Loaded {sum(len(d['time']) for d in esc_data.values())} data points from {detected_esc_count} ESCs: {detected_escs}")
     
@@ -1567,13 +1872,17 @@ def main():
         
         print(f"\n{'='*55}")
         print(f"Current: {run_label} | ESC: [{esc_label}] | Filter: {filter_label} | Eff: {eff_unit_label}")
-        print(f"Config: {poles} Pole Pairs (Scale: {poles}/14.0 = {poles/14.0:.3f})")
+        print(f"Motor: {motor_spec['name']}")
+        if isinstance(poles, dict):
+            print(f"Config: Mixed Poles {poles}")
+        else:
+            print(f"Config: {poles} Pole Pairs (Scale: {poles}/14.0 = {poles/14.0:.3f})")
         print(f"{'='*55}")
         print("[1] Plot ESC Basics (RPM, Volt, Curr, Temp)")
         print("[2] Plot Power (Total Current & Power)")
         print(f"[3] Plot Efficiency ({eff_unit_label})")
         print("[4] Voltage Sag Analysis")
-        print(f"[5] Benchmark vs {MOTOR_SPEC['name']}")
+        print(f"[5] Benchmark vs {motor_spec['name']}")
         print("[6] System Analysis (Voltage-Efficiency)")
         print("[7] Change Run")
         print("[8] Filter ESCs")
@@ -1599,11 +1908,28 @@ def main():
         elif choice == '3':
             plot_efficiency(esc_data, derived, active_escs, title, f"{base_save}_efficiency.png", efficiency_mode)
         elif choice == '4':
-            plot_voltage_sag(esc_data, derived, active_escs, title, f"{base_save}_vsag.png", detected_esc_count)
+            plot_voltage_sag(
+                esc_data,
+                derived,
+                active_escs,
+                title,
+                f"{base_save}_vsag.png",
+                esc_count_override,
+                esc_count_series
+            )
         elif choice == '5':
-            plot_benchmark(esc_data, derived, active_escs, title, f"{base_save}_benchmark.png", efficiency_mode)
+            plot_benchmark(esc_data, derived, active_escs, title, f"{base_save}_benchmark.png", motor_spec, efficiency_mode)
         elif choice == '6':
-            plot_system_analysis(esc_data, derived, active_escs, title, f"{base_save}_sysanalysis.png", detected_esc_count, efficiency_mode)
+            plot_system_analysis(
+                esc_data,
+                derived,
+                active_escs,
+                title,
+                f"{base_save}_sysanalysis.png",
+                esc_count_override,
+                efficiency_mode,
+                esc_count_series
+            )
         elif choice == '7':
             # Change Run
             print_run_table(stats) if runs[0] != (0,0) else print("No runs to select.")
@@ -1652,7 +1978,7 @@ def main():
                 # Recompute derived metrics with new filter
                 print(f"Applying filter RC={filter_rc:.2f}s..." if filter_rc > 0 else "Disabling filter...")
                 derived.clear()
-                derived.update(compute_derived_metrics(esc_data, filter_rc))
+                derived.update(compute_derived_metrics(esc_data, filter_rc, prop_k=prop_k, current_scale_rules=current_scale_rules))
                 print("Done! Metrics recomputed with new filter.")
             except:
                 print("Invalid input. Keeping current filter.")
@@ -1661,28 +1987,45 @@ def main():
             efficiency_mode = 'rpm_w' if efficiency_mode == 'pct' else 'pct'
             print(f"Switched efficiency unit to: {'RPM/Watt' if efficiency_mode == 'rpm_w' else 'Motor Efficiency (%)'}")
         elif choice == 'p':
+            print(f"Current Configured Poles: {poles}")
+            print("Enter new configuration:")
+            print("  - Single int (e.g. '19') for all ESCs")
+            print("  - Comma list (e.g. '19,21,19,21') for ESC 0,1,2,3")
+            print("  - Key:Value (e.g. '0:19, 1:21') for specific instances")
+            val = input("> ").strip().strip('"').strip("'")
+            
             try:
-                print(f"Current Configured Poles: {poles}")
-                val = input("Enter new pole count (e.g. 19 or 21): ").strip()
-                new_poles = int(val)
-                if new_poles < 2: raise ValueError
+                if ':' in val:
+                    # Parse key:value pairs
+                    new_poles = {}
+                    for item in val.split(','):
+                        k, v = item.split(':')
+                        new_poles[int(k.strip())] = int(v.strip())
+                elif ',' in val:
+                    # Parse list
+                    parts = [int(x.strip()) for x in val.split(',') if x.strip()]
+                    new_poles = {i: p for i, p in enumerate(parts)}
+                else:
+                    # Parse single int
+                    new_poles = int(val)
+                    if new_poles < 2: raise ValueError
                 
                 poles = new_poles
-                print(f"Reloading data with {poles} pole pairs...")
+                print(f"Reloading data with config: {poles} ...")
                 
                 # Check cache for new config
-                if is_cache_valid(filepath, poles):
+                if is_cache_valid(filepath, poles, esc_channel_map):
                     all_esc_data, _ = load_from_cache(filepath, poles)
                 else:
                     print("Parsing bin file for new config...")
-                    all_esc_data = load_esc_data(filepath, 0, 0, poles)
-                    save_to_cache(filepath, all_esc_data, runs, poles)
+                    all_esc_data = load_esc_data(filepath, 0, 0, poles, esc_channel_map)
+                    save_to_cache(filepath, all_esc_data, runs, poles, esc_channel_map)
                 
                 # Reload current view
                 load_run(current_run_idx)
-                print(f"Configuration updated to {poles} poles.")
-            except:
-                print("Invalid input.")
+                print(f"Configuration updated.")
+            except Exception as e:
+                print(f"Invalid input: {e}")
         elif choice == 'q':
             print("Goodbye!")
             break
