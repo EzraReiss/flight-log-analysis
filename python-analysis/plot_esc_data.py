@@ -32,7 +32,7 @@ except ImportError:
 
 # Minimum current threshold for reliable sensor readings
 # Data below this value is excluded from efficiency/voltage sag calculations
-MIN_CURRENT_THRESHOLD = 8.0  # Amps (raised from 10A to exclude shutdown periods)
+MIN_CURRENT_THRESHOLD = 15.0  # Amps; ESC current telemetry is unreliable below this level
 
 # Minimum throttle threshold for active motor data
 # Data below this PWM value indicates motor is ramping down/stopped
@@ -44,7 +44,7 @@ MIN_THROTTLE_THRESHOLD = 1400  # PWM value (typically 1000-2000 range)
 DEFAULT_FILTER_RC = 2.0
 
 # Cache directory (stored next to the bin file)
-CACHE_VERSION = "v8"  # Increment when cache format changes (v8 adds esc_channel_map to meta)
+CACHE_VERSION = "v9"  # v9 separates explicit RPM scaling from motor pole-pair metadata
 
 
 def lowpass_filter(data, times, rc_constant):
@@ -77,6 +77,33 @@ def lowpass_filter(data, times, rc_constant):
 
 # Built-in specs. Keys are used by --motor or config "motor_spec".
 MOTOR_SPECS = {
+    # MAD M6C10 EEE 200KV with FLUXER PRO 20x6.0 MATT prop, 12S.
+    # The published MAD comparison table used an AMPX 60A ESC. The installed
+    # AMPX 40A ESC should be treated as the current limit; the motor/prop load
+    # and RPM comparison remain the applicable reference.
+    "mad_m6c10_200kv_12s": {
+        'name': 'MAD M6C10 EEE 200KV (12S)',
+        'prop': 'FLUXER PRO 20x6.0 MATT',
+        'note': 'MAD reference table uses AMPX 60A; installed configuration uses AMPX 40A',
+        'data': {
+            # Throttle %: [Voltage, Current, Input Power, Output Power, RPM, Efficiency %]
+            30:  [48.24,  2.05,   98.5,   65.9, 2675, 66.92],
+            35:  [48.24,  2.86,  137.5,   94.6, 3021, 68.77],
+            40:  [48.25,  3.89,  187.1,  137.6, 3416, 73.49],
+            45:  [48.23,  5.37,  258.4,  198.4, 3864, 76.76],
+            50:  [48.16,  7.22,  347.2,  275.3, 4289, 79.25],
+            55:  [48.16,  9.12,  438.5,  354.0, 4656, 80.68],
+            60:  [48.16, 11.23,  540.1,  438.1, 4980, 81.06],
+            65:  [48.15, 13.58,  653.7,  525.4, 5308, 80.33],
+            70:  [48.13, 16.61,  798.9,  614.5, 5605, 77.13],
+            75:  [48.04, 18.60,  892.9,  732.7, 5915, 82.05],
+            80:  [48.03, 21.17, 1016.3,  848.3, 6234, 83.42],
+            85:  [48.04, 26.12, 1254.5,  994.7, 6553, 79.24],
+            90:  [47.97, 29.73, 1425.6, 1150.9, 6834, 80.75],
+            95:  [47.93, 32.88, 1575.1, 1309.8, 7127, 83.14],
+            100: [47.92, 39.79, 1906.6, 1505.3, 7470, 78.80],
+        }
+    },
     # MAD V62 PRO IPE 210KV with CF FLUXER 22.1x7.4 VTOL prop, AMPX 80A ESC, 12S
     # Source: Manufacturer datasheet
     "mad_v62_12s": {
@@ -128,7 +155,7 @@ MOTOR_SPECS = {
     }
 }
 
-DEFAULT_MOTOR_SPEC_KEY = "mad_v62_12s"
+DEFAULT_MOTOR_SPEC_KEY = "mad_m6c10_200kv_12s"
 
 def get_motor_spec(spec_key):
     """Return a motor spec dict by key, or exit with an error."""
@@ -301,13 +328,13 @@ def get_output_dir(filepath):
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
 
-def get_poles_cache_key(poles):
-    """Generate a filename suffix string for the pole configuration."""
+def get_poles_cache_key(poles, rpm_scale=1.0):
+    """Generate a filename suffix for pole metadata and explicit RPM scale."""
     if isinstance(poles, int):
-        return f"p{poles}"
+        pole_key = f"p{poles}"
     elif isinstance(poles, str):
         # Should be int if simple, but handle str just in case
-        return f"p{poles}"
+        pole_key = f"p{poles}"
     elif isinstance(poles, dict):
         # Create a deterministic string for the dict
         # e.g. p_mixed_HASH
@@ -315,25 +342,28 @@ def get_poles_cache_key(poles):
         # Sort items to ensure stability
         s = json.dumps(dict(sorted(poles.items())), sort_keys=True)
         h = hashlib.md5(s.encode()).hexdigest()[:8]
-        return f"p_mixed_{h}"
-    return "p_unknown"
+        pole_key = f"p_mixed_{h}"
+    else:
+        pole_key = "p_unknown"
+    scale_key = f"s{float(rpm_scale):g}".replace('-', 'm').replace('.', 'p')
+    return f"{pole_key}_{scale_key}"
 
-def get_cache_path(filepath, poles):
-    """Get the cache file path for a given bin file and pole config."""
+def get_cache_path(filepath, poles, rpm_scale=1.0):
+    """Get the cache file path for a pole description and RPM scale."""
     output_dir = get_output_dir(filepath)
-    suffix = get_poles_cache_key(poles)
+    suffix = get_poles_cache_key(poles, rpm_scale)
     return os.path.join(output_dir, f"esc_data_cache_{suffix}.csv")
 
-def get_cache_meta_path(filepath, poles):
+def get_cache_meta_path(filepath, poles, rpm_scale=1.0):
     """Get the cache metadata file path."""
     output_dir = get_output_dir(filepath)
-    suffix = get_poles_cache_key(poles)
+    suffix = get_poles_cache_key(poles, rpm_scale)
     return os.path.join(output_dir, f"cache_meta_{suffix}.json")
 
-def is_cache_valid(filepath, poles, esc_channel_map):
+def is_cache_valid(filepath, poles, rpm_scale, esc_channel_map):
     """Check if cached data exists and is still valid."""
-    cache_path = get_cache_path(filepath, poles)
-    meta_path = get_cache_meta_path(filepath, poles)
+    cache_path = get_cache_path(filepath, poles, rpm_scale)
+    meta_path = get_cache_meta_path(filepath, poles, rpm_scale)
     
     if not os.path.exists(cache_path) or not os.path.exists(meta_path):
         return False
@@ -350,6 +380,10 @@ def is_cache_valid(filepath, poles, esc_channel_map):
         # Check pole count matches
         if meta.get('poles') != poles:
             print(f"Cache pole count mismatch ({meta.get('poles')} vs {poles}), reparsing...")
+            return False
+
+        if float(meta.get('rpm_scale', 1.0)) != float(rpm_scale):
+            print(f"Cache RPM scale mismatch ({meta.get('rpm_scale')} vs {rpm_scale}), reparsing...")
             return False
 
         # Check ESC channel map matches
@@ -375,12 +409,12 @@ def is_cache_valid(filepath, poles, esc_channel_map):
         return False
 
 
-def load_from_cache(filepath, poles):
+def load_from_cache(filepath, poles, rpm_scale):
     """Load ESC data and runs from cache (CSV format)."""
-    cache_path = get_cache_path(filepath, poles)
-    meta_path = get_cache_meta_path(filepath, poles)
+    cache_path = get_cache_path(filepath, poles, rpm_scale)
+    meta_path = get_cache_meta_path(filepath, poles, rpm_scale)
     
-    print(f"Loading from cache (Poles: {poles})...")
+    print(f"Loading from cache (Poles: {poles}, RPM scale: {rpm_scale:g})...")
     
     try:
         # Load ESC data from CSV
@@ -397,7 +431,8 @@ def load_from_cache(filepath, poles):
         
         for inst in df['instance'].unique():
             inst_df = df[df['instance'] == inst].sort_values('time')
-            esc_data[inst] = {
+            inst_key = int(inst)
+            esc_data[inst_key] = {
                 'time_us': inst_df['time_us'].tolist(),
                 'time': inst_df['time'].tolist(),
                 'rpm': inst_df['rpm'].tolist(),
@@ -415,12 +450,12 @@ def load_from_cache(filepath, poles):
         return None, None
 
 
-def save_to_cache(filepath, esc_data, runs, poles, esc_channel_map):
+def save_to_cache(filepath, esc_data, runs, poles, rpm_scale, esc_channel_map):
     """Save ESC data and runs to cache (CSV format for easy viewing)."""
-    cache_path = get_cache_path(filepath, poles)
-    meta_path = get_cache_meta_path(filepath, poles)
+    cache_path = get_cache_path(filepath, poles, rpm_scale)
+    meta_path = get_cache_meta_path(filepath, poles, rpm_scale)
     
-    print(f"Saving to cache (Poles: {poles})...")
+    print(f"Saving to cache (Poles: {poles}, RPM scale: {rpm_scale:g})...")
     
     try:
         # Convert esc_data to DataFrame
@@ -450,6 +485,7 @@ def save_to_cache(filepath, esc_data, runs, poles, esc_channel_map):
             'runs': runs,
             'esc_count': len(esc_data),
             'poles': poles,
+            'rpm_scale': float(rpm_scale),
             'esc_channel_map': esc_channel_map_to_meta(esc_channel_map)
         }
         
@@ -520,13 +556,14 @@ def detect_runs(filepath, throttle_threshold=1200, cooldown_sec=10.0):
     return runs
 
 
-def load_esc_data(filepath, start_us=0, end_us=0, poles=19, esc_channel_map=None):
+def load_esc_data(filepath, start_us=0, end_us=0, poles=14, rpm_scale=1.0, esc_channel_map=None):
     """Load ESC data within optional time range. Returns dict by instance.
     
     Args:
         filepath: Path to .BIN file
         start_us, end_us: Time range (0=all)
-        poles: Configured pole pairs in ESC (used to correct RPM)
+        poles: Motor pole-pair metadata (does not alter RPM)
+        rpm_scale: Explicit multiplier applied directly to logged RPM (default 1.0)
         esc_channel_map: Optional dict mapping ESC instance -> RCOU channel (1-8)
     """
     esc_data = defaultdict(lambda: {'time_us': [], 'time': [], 'rpm': [], 'volt': [], 'curr': [], 'temp': [], 'throttle': []})
@@ -621,18 +658,9 @@ def load_esc_data(filepath, start_us=0, end_us=0, poles=19, esc_channel_map=None
             
             esc_data[i]['time_us'].append(msg.TimeUS)
             esc_data[i]['time'].append(t_sec)
-            # RPM Correction: Motor has 14 pole pairs.
-            # User logic: "reading was actually 19/14 * current ESC rpm"
-            # So we multiply by (Configured / Real).
-            
-            # Determine configured pole count for this instance
-            if isinstance(poles, dict):
-                p_config = poles.get(i, 19) # Default to 19 if not specified
-            else:
-                p_config = int(poles)
-                
-            rpm_scale = float(p_config) / 14.0
-            esc_data[i]['rpm'].append(msg.RPM * rpm_scale)
+            # Pole-pair count is descriptive only. Logged RPM is trusted as-is
+            # unless the user supplies an explicit --rpm-scale multiplier.
+            esc_data[i]['rpm'].append(msg.RPM * float(rpm_scale))
             
             esc_data[i]['volt'].append(msg.Volt)
             esc_data[i]['curr'].append(msg.Curr)
@@ -642,6 +670,112 @@ def load_esc_data(filepath, start_us=0, end_us=0, poles=19, esc_channel_map=None
             continue
             
     return esc_data
+
+
+def _interpolate_without_bridging_gaps(times, values, grid):
+    """Interpolate one ESC series while leaving startup/dropout periods as NaN."""
+    if len(times) < 2 or len(values) < 2 or len(grid) == 0:
+        return np.full(len(grid), np.nan)
+    n = min(len(times), len(values))
+    t = np.asarray(times[:n], dtype=float)
+    y = np.asarray(values[:n], dtype=float)
+    valid = np.isfinite(t) & np.isfinite(y)
+    t, y = t[valid], y[valid]
+    if len(t) < 2:
+        return np.full(len(grid), np.nan)
+    order = np.argsort(t)
+    t, y = t[order], y[order]
+    t, unique_idx = np.unique(t, return_index=True)
+    y = y[unique_idx]
+    if len(t) < 2:
+        return np.full(len(grid), np.nan)
+
+    result = np.interp(grid, t, y, left=np.nan, right=np.nan)
+    sample_dt = np.diff(t)
+    typical_dt = float(np.median(sample_dt[sample_dt > 0])) if np.any(sample_dt > 0) else 0.25
+    max_nearest_distance = max(0.5, 2.5 * typical_dt)
+    right_idx = np.searchsorted(t, grid, side='left')
+    left_idx = np.clip(right_idx - 1, 0, len(t) - 1)
+    right_idx = np.clip(right_idx, 0, len(t) - 1)
+    nearest = np.minimum(np.abs(grid - t[left_idx]), np.abs(t[right_idx] - grid))
+    result[nearest > max_nearest_distance] = np.nan
+    return result
+
+
+def build_synchronized_total_series(esc_data, per_esc, selected_escs=None):
+    """Synchronize ESCs by timestamp and aggregate only currently reporting ESCs.
+
+    Voltage is the average of the selected ESCs that are reporting at each time.
+    Current is their sum. `power` is average voltage times summed current, while
+    `sum_esc_power` is the independent sum of each ESC's V*I for comparison.
+    """
+    selected = sorted(selected_escs if selected_escs is not None else esc_data.keys())
+    selected = [i for i in selected if i in esc_data and len(esc_data[i].get('time', [])) >= 2]
+    if not selected:
+        return {
+            'time': [], 'curr': [], 'power': [], 'sum_esc_power': [],
+            'avg_volt': [], 'avg_temp': [], 'esc_count': []
+        }
+
+    all_times = [
+        np.asarray(esc_data[i]['time'], dtype=float)
+        for i in selected if esc_data[i].get('time')
+    ]
+    positive_steps = np.concatenate([
+        np.diff(t)[np.diff(t) > 0] for t in all_times if len(t) >= 2
+    ])
+    grid_dt = float(np.median(positive_steps)) if len(positive_steps) else 0.25
+    grid_dt = min(1.0, max(0.05, grid_dt))
+    grid_start = min(float(t[0]) for t in all_times)
+    grid_end = max(float(t[-1]) for t in all_times)
+    grid = np.arange(grid_start, grid_end + grid_dt * 0.5, grid_dt)
+
+    volt_rows, curr_rows, temp_rows = [], [], []
+    for i in selected:
+        data = esc_data[i]
+        deriv = per_esc.get(i, {})
+        volt_rows.append(_interpolate_without_bridging_gaps(
+            data['time'], deriv.get('volt_filtered', data.get('volt', [])), grid
+        ))
+        curr_rows.append(_interpolate_without_bridging_gaps(
+            data['time'], deriv.get('curr_filtered', data.get('curr', [])), grid
+        ))
+        temp_rows.append(_interpolate_without_bridging_gaps(
+            data['time'], data.get('temp', []), grid
+        ))
+
+    volts = np.vstack(volt_rows)
+    currents = np.vstack(curr_rows)
+    temps = np.vstack(temp_rows)
+    reporting = np.isfinite(volts) & np.isfinite(currents)
+    esc_count = np.sum(reporting, axis=0)
+    voltage_sum = np.nansum(np.where(reporting, volts, np.nan), axis=0)
+    avg_volt = np.divide(
+        voltage_sum, esc_count,
+        out=np.full(len(grid), np.nan), where=esc_count > 0
+    )
+    temp_reporting = reporting & np.isfinite(temps)
+    temp_count = np.sum(temp_reporting, axis=0)
+    temp_sum = np.nansum(np.where(temp_reporting, temps, np.nan), axis=0)
+    avg_temp = np.divide(
+        temp_sum, temp_count,
+        out=np.full(len(grid), np.nan), where=temp_count > 0
+    )
+    total_curr = np.nansum(np.where(reporting, currents, np.nan), axis=0)
+    sum_esc_power = np.nansum(np.where(reporting, volts * currents, np.nan), axis=0)
+    total_curr[esc_count == 0] = np.nan
+    sum_esc_power[esc_count == 0] = np.nan
+    avg_power = avg_volt * total_curr
+
+    return {
+        'time': grid.tolist(),
+        'curr': total_curr.tolist(),
+        'power': avg_power.tolist(),
+        'sum_esc_power': sum_esc_power.tolist(),
+        'avg_volt': avg_volt.tolist(),
+        'avg_temp': avg_temp.tolist(),
+        'esc_count': esc_count.astype(int).tolist(),
+    }
 
 
 def compute_derived_metrics(esc_data, rc_filter=0, prop_k=None, current_scale_rules=None):
@@ -659,7 +793,10 @@ def compute_derived_metrics(esc_data, rc_filter=0, prop_k=None, current_scale_ru
 
     derived = {
         'per_esc': {},  # Power and efficiency per ESC
-        'total': {'time': [], 'curr': [], 'power': []}
+        'total': {
+            'time': [], 'curr': [], 'power': [], 'sum_esc_power': [],
+            'avg_volt': [], 'avg_temp': [], 'esc_count': []
+        }
     }
     
     # First, find a common time base (use first ESC with data as reference)
@@ -678,16 +815,11 @@ def compute_derived_metrics(esc_data, rc_filter=0, prop_k=None, current_scale_ru
         return derived
     
     ref_times = esc_data[ref_instance]['time']
-    derived['total']['time'] = ref_times
 
     max_throttle = build_max_throttle_series(esc_data, ref_times)
     use_scale_rules = bool(current_scale_rules) and max(max_throttle) > 0
     if current_scale_rules and not use_scale_rules:
         print("Warning: Current scale rules configured but throttle data is missing. Skipping scaling.")
-    
-    # Initialize totals
-    total_curr = [0.0] * len(ref_times)
-    total_power = [0.0] * len(ref_times)
     
     for inst in esc_data:
         data = esc_data[inst]
@@ -733,11 +865,6 @@ def compute_derived_metrics(esc_data, rc_filter=0, prop_k=None, current_scale_ru
             efficiency.append(eff_pct)  # Default to %
             efficiency_rpm_w.append(eff_rpm_w)
             
-            # Accumulate totals (only if same length)
-            if j < len(total_curr):
-                total_curr[j] += i
-                total_power[j] += p
-        
         derived['per_esc'][inst] = {
             'power': power,
             'efficiency': efficiency,
@@ -747,8 +874,7 @@ def compute_derived_metrics(esc_data, rc_filter=0, prop_k=None, current_scale_ru
             'curr_filtered': curr_scaled
         }
     
-    derived['total']['curr'] = total_curr
-    derived['total']['power'] = total_power
+    derived['total'] = build_synchronized_total_series(esc_data, derived['per_esc'])
     
     return derived
 
@@ -791,7 +917,7 @@ def analyze_runs_from_cache(runs, all_esc_data, prop_k=None, current_scale_rules
         derived = compute_derived_metrics(run_data, prop_k=prop_k, current_scale_rules=current_scale_rules)
         
         duration = (end - start) / 1e6 if (end and start) else 0
-        max_rpm = max_curr = max_temp = avg_eff = total_energy = 0
+        max_rpm = max_curr = max_temp = avg_eff = total_energy = total_charge_ah = 0
         
         for inst in run_data:
             d = run_data[inst]
@@ -803,20 +929,34 @@ def analyze_runs_from_cache(runs, all_esc_data, prop_k=None, current_scale_rules
             if d['temp']:
                 max_temp = max(max_temp, max(d['temp']))
         
-        # Total energy (Wh) = integral of power over time
-        if derived['total']['time'] and derived['total']['power']:
-            times = derived['total']['time']
-            powers = derived['total']['power']
-            energy_ws = sum((powers[i] + powers[i+1]) / 2 * (times[i+1] - times[i]) 
-                           for i in range(len(times)-1) if i+1 < len(powers))
-            total_energy = energy_ws / 3600  # Convert Ws to Wh
-            
-            # Average efficiency across all ESCs (only valid readings)
-            eff_values = []
-            for inst in derived['per_esc']:
-                eff_values.extend([e for e in derived['per_esc'][inst]['efficiency'] if e is not None and e > 0])
-            if eff_values:
-                avg_eff = sum(eff_values) / len(eff_values)
+        # Integrate each ESC on its own timestamp axis, then sum. ESC message
+        # streams can have unequal lengths and small timestamp offsets; summing
+        # samples by array index before integration can materially overstate Wh.
+        for inst, d in run_data.items():
+            times = d.get('time', [])
+            powers = derived['per_esc'].get(inst, {}).get('power', [])
+            currents = derived['per_esc'].get(inst, {}).get('curr_filtered', d.get('curr', []))
+            n_power = min(len(times), len(powers))
+            n_current = min(len(times), len(currents))
+            if n_power >= 2:
+                energy_ws = sum(
+                    (powers[i] + powers[i + 1]) / 2 * (times[i + 1] - times[i])
+                    for i in range(n_power - 1)
+                )
+                total_energy += energy_ws / 3600
+            if n_current >= 2:
+                charge_as = sum(
+                    (currents[i] + currents[i + 1]) / 2 * (times[i + 1] - times[i])
+                    for i in range(n_current - 1)
+                )
+                total_charge_ah += charge_as / 3600
+
+        # Average efficiency across all ESCs (only valid readings)
+        eff_values = []
+        for inst in derived['per_esc']:
+            eff_values.extend([e for e in derived['per_esc'][inst]['efficiency'] if e is not None and e > 0])
+        if eff_values:
+            avg_eff = sum(eff_values) / len(eff_values)
         
         stats.append({
             'id': idx + 1,
@@ -827,13 +967,14 @@ def analyze_runs_from_cache(runs, all_esc_data, prop_k=None, current_scale_rules
             'max_curr': max_curr,
             'max_temp': max_temp,
             'energy_wh': total_energy,
+            'charge_ah': total_charge_ah,
             'avg_eff': avg_eff
         })
         
     return stats
 
 
-def combine_runs_data(runs, all_esc_data, current_threshold=MIN_CURRENT_THRESHOLD, throttle_threshold=MIN_THROTTLE_THRESHOLD):
+def combine_runs_data(runs, all_esc_data, current_threshold=None, throttle_threshold=MIN_THROTTLE_THRESHOLD):
     """Combine all runs into continuous data without gaps between runs.
     
     Args:
@@ -846,6 +987,9 @@ def combine_runs_data(runs, all_esc_data, current_threshold=MIN_CURRENT_THRESHOL
         combined_esc_data: Dict with continuous time axis, run boundaries marked
         run_boundaries: List of cumulative times where each run ends
     """
+    if current_threshold is None:
+        current_threshold = MIN_CURRENT_THRESHOLD
+
     combined = defaultdict(lambda: {'time': [], 'rpm': [], 'volt': [], 'curr': [], 'temp': [], 'throttle': []})
     run_boundaries = []
     cumulative_time = 0.0
@@ -1035,20 +1179,22 @@ def plot_power(esc_data, derived, active_escs, title_prefix, save_path):
     fig, axs = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
     fig.suptitle(f'{title_prefix} - Power Analysis', fontsize=14)
     
-    ref_time = derived['total']['time'] if derived['total']['time'] else []
+    synchronized = build_synchronized_total_series(esc_data, derived['per_esc'], active_escs)
+    ref_time = synchronized['time']
     
     # Get active time range to crop out low-power startup/shutdown
     t_start, t_end = get_active_time_range(esc_data)
     
     # Total Current
     ax = axs[0]
-    total_curr = derived['total']['curr']
+    total_curr = synchronized['curr']
     ax.plot(ref_time, total_curr, color='black', linewidth=2, label='Total')
     ax.set_ylabel('Total Current (A)')
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
-    if total_curr:
-        stats = f"Min: {min(total_curr):.1f}  Med: {np.median(total_curr):.1f}  Max: {max(total_curr):.1f}"
+    finite_total_curr = [x for x in total_curr if np.isfinite(x)]
+    if finite_total_curr:
+        stats = f"Min: {min(finite_total_curr):.1f}  Med: {np.median(finite_total_curr):.1f}  Max: {max(finite_total_curr):.1f}"
         ax.text(0.02, 0.95, stats, transform=ax.transAxes, fontsize=9,
                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
@@ -1066,14 +1212,15 @@ def plot_power(esc_data, derived, active_escs, title_prefix, save_path):
     
     # Total Power
     ax = axs[2]
-    total_power = derived['total']['power']
+    total_power = synchronized['power']
     ax.plot(ref_time, total_power, color='purple', linewidth=2, label='Total Power')
     ax.set_ylabel('Total Power (W)')
     ax.set_xlabel('Time (s)')
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
-    if total_power:
-        stats = f"Min: {min(total_power):.1f}  Med: {np.median(total_power):.1f}  Max: {max(total_power):.1f}"
+    finite_total_power = [x for x in total_power if np.isfinite(x)]
+    if finite_total_power:
+        stats = f"Min: {min(finite_total_power):.1f}  Med: {np.median(finite_total_power):.1f}  Max: {max(finite_total_power):.1f}"
         ax.text(0.02, 0.95, stats, transform=ax.transAxes, fontsize=9,
                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
@@ -1166,9 +1313,10 @@ def plot_voltage_sag(esc_data, derived, active_escs, title_prefix, save_path, es
     fig, ax = plt.subplots(figsize=(10, 7))
     fig.suptitle(f'{title_prefix} - Voltage Sag Analysis [Total Current >= {min_total_current}A (ESCs: {count_label})]', fontsize=14)
     
-    # Use total current from derived metrics and average voltage
-    total_curr = derived['total']['curr']
-    ref_times = derived['total']['time']
+    synchronized = build_synchronized_total_series(esc_data, derived['per_esc'], active_escs)
+    total_curr = synchronized['curr']
+    ref_times = synchronized['time']
+    synchronized_counts = synchronized['esc_count']
     
     if not total_curr or not ref_times:
         ax.text(0.5, 0.5, 'No data available',
@@ -1178,32 +1326,23 @@ def plot_voltage_sag(esc_data, derived, active_escs, title_prefix, save_path, es
         plt.show()
         return
     
-    # Calculate average voltage and temperature across active ESCs at each time point
-    n_points = len(ref_times)
     avg_volt = []
     avg_temp = []
     valid_curr = []
-    
-    for j in range(n_points):
-        # Get voltage and temp from all active ESCs at this time index
-        volts = []
-        temps = []
-        for i in active_escs:
-            if i in esc_data and j < len(esc_data[i]['volt']):
-                volts.append(esc_data[i]['volt'][j])
-                temps.append(esc_data[i]['temp'][j])
-        
-        if volts and j < len(total_curr):
-            curr = total_curr[j]
-            count = esc_count
-            if esc_count_series and j < len(esc_count_series) and esc_count_series[j] > 0:
-                count = esc_count_series[j]
-            min_total_current_j = MIN_CURRENT_THRESHOLD * count
-            # Filter by total current threshold (MIN_CURRENT_THRESHOLD * ESC count)
-            if curr >= min_total_current_j:
-                avg_volt.append(sum(volts) / len(volts))
-                avg_temp.append(sum(temps) / len(temps))
-                valid_curr.append(curr)
+
+    for j, curr in enumerate(total_curr):
+        if not np.isfinite(curr):
+            continue
+        count = synchronized_counts[j] if j < len(synchronized_counts) else esc_count
+        if count <= 0:
+            continue
+        min_total_current_j = MIN_CURRENT_THRESHOLD * count
+        voltage = synchronized['avg_volt'][j]
+        temperature = synchronized['avg_temp'][j]
+        if curr >= min_total_current_j and np.isfinite(voltage):
+            avg_volt.append(voltage)
+            avg_temp.append(temperature if np.isfinite(temperature) else 0)
+            valid_curr.append(curr)
     
     if valid_curr and avg_volt:
         scatter = ax.scatter(valid_curr, avg_volt, c=avg_temp, cmap='coolwarm', 
@@ -1262,7 +1401,7 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
     Creates 4 subplots:
     1. Voltage vs Efficiency (based on mode) - colored by current
     2. Power vs Efficiency (based on mode) - shows efficiency drop at high power
-    3. Current vs Efficiency - per ESC scatter
+    3. ESC Input Power vs Efficiency - per-ESC scatter and median curves
     4. Voltage vs Total Power - shows power delivery at different voltage levels
     
     Args:
@@ -1372,16 +1511,50 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
     ax.grid(True, alpha=0.3)
     if mode == 'pct': ax.set_ylim(0, 110)
     
-    # --- Panel 3: Current vs Efficiency per ESC ---
+    # --- Panel 3: ESC Input Power vs Efficiency per ESC ---
+    # Use common power bins for every ESC so the median curves can be compared
+    # at the same electrical operating points. Raw samples remain visible to
+    # show spread and telemetry artifacts.
     ax = axs[1, 0]
+    power_bin_edges = np.linspace(min(all_power), max(all_power), 26)
     for i in active_escs:
-        if per_esc_data_local[i]['curr']:
-            ax.scatter(per_esc_data_local[i]['curr'], per_esc_data_local[i]['eff'], 
-                      color=COLORS[i % 4], alpha=0.4, s=10, label=f'ESC {i}')
+        esc_power = np.asarray(per_esc_data_local[i]['power'], dtype=float)
+        esc_eff = np.asarray(per_esc_data_local[i]['eff'], dtype=float)
+        valid = np.isfinite(esc_power) & np.isfinite(esc_eff) & (esc_power > 0)
+        esc_power = esc_power[valid]
+        esc_eff = esc_eff[valid]
+        if not len(esc_power):
+            continue
+
+        color = COLORS[i % 4]
+        ax.scatter(
+            esc_power, esc_eff, color=color, alpha=0.14, s=9,
+            edgecolors='none'
+        )
+
+        bin_ids = np.digitize(esc_power, power_bin_edges) - 1
+        median_power = []
+        median_eff = []
+        for bin_id in range(len(power_bin_edges) - 1):
+            in_bin = bin_ids == bin_id
+            # Suppress bins that only contain short transients; those sparse
+            # high-power samples otherwise create misleading median spikes.
+            if np.count_nonzero(in_bin) < 20:
+                continue
+            median_power.append(float(np.median(esc_power[in_bin])))
+            median_eff.append(float(np.median(esc_eff[in_bin])))
+
+        if median_power:
+            ax.plot(
+                median_power, median_eff, color=color, linewidth=2.0,
+                marker='o', markersize=3, label=f'ESC {i} median'
+            )
+        else:
+            ax.scatter([], [], color=color, s=20, label=f'ESC {i}')
     
-    ax.set_xlabel('ESC Current (A)')
+    ax.set_xlabel('ESC Input Power (W = V × I)')
     ax.set_ylabel(ylabel)
-    ax.set_title(f'{ylabel} vs Current (per ESC)')
+    ax.set_title(f'{ylabel} vs ESC Input Power (per ESC)')
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
     if mode == 'pct': ax.set_ylim(0, 110)
@@ -1389,27 +1562,21 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
     # --- Panel 4: Voltage vs Total Power ---
     ax = axs[1, 1]
     # Calculate total power for each voltage point
-    total_power = derived['total']['power']
-    ref_times = derived['total']['time']
+    synchronized = build_synchronized_total_series(esc_data, derived['per_esc'], active_escs)
+    total_power = synchronized['power']
+    ref_times = synchronized['time']
     
     volt_power_pairs = []
     # ... rest of function ...
     temp_for_pairs = []
     for j in range(min(len(ref_times), len(total_power))):
-        # Get average voltage at this time
-        volts = []
-        temps = []
-        for i in active_escs:
-            if i in esc_data and j < len(esc_data[i]['volt']):
-                volts.append(esc_data[i]['volt'][j])
-                if j < len(esc_data[i]['temp']):
-                    temps.append(esc_data[i]['temp'][j])
-        
-        if volts and total_power[j] > min_total_current * 40:  # Filter low power
-            avg_volt = sum(volts) / len(volts)
+        avg_volt = synchronized['avg_volt'][j]
+        avg_temp = synchronized['avg_temp'][j]
+        active_count = synchronized['esc_count'][j]
+        point_threshold = MIN_CURRENT_THRESHOLD * max(active_count, 1) * 40
+        if np.isfinite(avg_volt) and np.isfinite(total_power[j]) and total_power[j] > point_threshold:
             volt_power_pairs.append((avg_volt, total_power[j]))
-            if temps:
-                temp_for_pairs.append(sum(temps) / len(temps))
+            temp_for_pairs.append(avg_temp if np.isfinite(avg_temp) else 0)
     
     if volt_power_pairs:
         vp_volts, vp_power = zip(*volt_power_pairs)
@@ -1606,33 +1773,277 @@ def export_csv(esc_data, derived, filepath):
     print(f"Exported to: {csv_path}")
 
 
+def _integrate_finite_pairs(times, values):
+    """Trapezoidal integral without bridging NaN/dropout intervals."""
+    t = np.asarray(times, dtype=float)
+    y = np.asarray(values, dtype=float)
+    if len(t) < 2 or len(y) < 2:
+        return 0.0
+    n = min(len(t), len(y))
+    t, y = t[:n], y[:n]
+    dt = np.diff(t)
+    valid_pairs = np.isfinite(y[:-1]) & np.isfinite(y[1:]) & (dt > 0)
+    areas = np.where(valid_pairs, ((y[:-1] + y[1:]) / 2) * dt, 0.0)
+    return float(np.sum(areas))
+
+
+def calculate_energy_between_times(esc_data, per_esc, selected_escs, start_s, end_s):
+    """Integrate average ESC voltage × summed ESC current over a time interval."""
+    synchronized = build_synchronized_total_series(esc_data, per_esc, selected_escs)
+    if not synchronized['time']:
+        return None
+    t = np.asarray(synchronized['time'], dtype=float)
+    interval = (t >= start_s) & (t <= end_s)
+    if np.count_nonzero(interval) < 2:
+        return None
+    ti = t[interval]
+    current = np.asarray(synchronized['curr'], dtype=float)[interval]
+    voltage = np.asarray(synchronized['avg_volt'], dtype=float)[interval]
+    power_avg_voltage = np.asarray(synchronized['power'], dtype=float)[interval]
+    power_sum_esc = np.asarray(synchronized['sum_esc_power'], dtype=float)[interval]
+    counts = np.asarray(synchronized['esc_count'], dtype=int)[interval]
+
+    energy_avg_v_wh = _integrate_finite_pairs(ti, power_avg_voltage) / 3600
+    energy_sum_esc_wh = _integrate_finite_pairs(ti, power_sum_esc) / 3600
+    charge_ah = _integrate_finite_pairs(ti, current) / 3600
+    voltage_time = _integrate_finite_pairs(ti, np.where(np.isfinite(voltage), voltage, np.nan))
+    valid_voltage_seconds = _integrate_finite_pairs(ti, np.where(np.isfinite(voltage), 1.0, np.nan))
+    mean_voltage = voltage_time / valid_voltage_seconds if valid_voltage_seconds > 0 else float('nan')
+    valid_counts = counts[counts > 0]
+    grid_dt = float(np.median(np.diff(ti))) if len(ti) >= 2 else 0.0
+    reporting_seconds = {
+        int(count): float(np.count_nonzero(counts == count) * grid_dt)
+        for count in sorted(set(counts.tolist()))
+    }
+
+    return {
+        'start_s': float(start_s),
+        'end_s': float(end_s),
+        'duration_s': float(end_s - start_s),
+        'energy_wh': energy_avg_v_wh,
+        'sum_esc_energy_wh': energy_sum_esc_wh,
+        'method_difference_wh': energy_avg_v_wh - energy_sum_esc_wh,
+        'charge_ah': charge_ah,
+        'mean_voltage': mean_voltage,
+        'min_reporting_escs': int(np.min(valid_counts)) if len(valid_counts) else 0,
+        'max_reporting_escs': int(np.max(valid_counts)) if len(valid_counts) else 0,
+        'reporting_seconds': reporting_seconds,
+    }
+
+
+def plot_interactive_voltage_energy_curve(esc_data, derived, active_escs, title_prefix, save_path):
+    """Show voltage versus time and measure energy between two clicked times."""
+    synchronized = build_synchronized_total_series(
+        esc_data, derived.get('per_esc', {}), active_escs
+    )
+    if not synchronized['time']:
+        print("No synchronized ESC data available for the voltage-time curve.")
+        return
+
+    time_s = np.asarray(synchronized['time'], dtype=float)
+    voltage = np.asarray(synchronized['avg_volt'], dtype=float)
+    current = np.asarray(synchronized['curr'], dtype=float)
+    power = np.asarray(synchronized['power'], dtype=float)
+    esc_counts = np.asarray(synchronized['esc_count'], dtype=int)
+
+    energy_steps = np.zeros(len(time_s), dtype=float)
+    charge_steps = np.zeros(len(time_s), dtype=float)
+    if len(time_s) >= 2:
+        dt = np.diff(time_s)
+        valid_power_pairs = (
+            np.isfinite(power[:-1]) & np.isfinite(power[1:]) & (dt > 0)
+        )
+        valid_current_pairs = (
+            np.isfinite(current[:-1]) & np.isfinite(current[1:]) & (dt > 0)
+        )
+        energy_steps[1:] = np.where(
+            valid_power_pairs,
+            ((power[:-1] + power[1:]) / 2) * dt / 3600,
+            0.0
+        )
+        charge_steps[1:] = np.where(
+            valid_current_pairs,
+            ((current[:-1] + current[1:]) / 2) * dt / 3600,
+            0.0
+        )
+    cumulative_wh = np.cumsum(energy_steps)
+    cumulative_ah = np.cumsum(charge_steps)
+
+    valid = np.isfinite(voltage) & np.isfinite(cumulative_wh) & (esc_counts > 0)
+    valid_indices = np.flatnonzero(valid)
+    if len(valid_indices) < 2:
+        print("Not enough valid voltage data to draw the curve.")
+        return
+
+    setup_style()
+    fig, ax = plt.subplots(figsize=(12, 7))
+    fig.suptitle(f"{title_prefix} - Voltage vs Time / Energy Interval", fontsize=14)
+    curve_time = np.where(valid, time_s, np.nan)
+    curve_voltage = np.where(valid, voltage, np.nan)
+    ax.plot(curve_time, curve_voltage, color='0.45', linewidth=1.0, alpha=0.65)
+
+    # Keep the scatter responsive on large logs while retaining the full curve
+    # for nearest-point selection and energy calculations.
+    plot_step = max(1, len(valid_indices) // 3500)
+    plotted = valid_indices[::plot_step]
+    scatter = ax.scatter(
+        time_s[plotted], voltage[plotted], c=current[plotted],
+        cmap='viridis', s=9, alpha=0.65, edgecolors='none'
+    )
+    colorbar = fig.colorbar(scatter, ax=ax)
+    colorbar.set_label('Summed ESC current (A)')
+    ax.set_xlabel('Time since selected log start (s)')
+    ax.set_ylabel('Average reporting-ESC voltage (V)')
+    ax.grid(True, alpha=0.3)
+
+    instruction = ax.text(
+        0.01, 0.99,
+        'Left-click two times. Right-click to clear.',
+        transform=ax.transAxes, va='top', fontsize=9,
+        bbox=dict(boxstyle='round', facecolor='white', alpha=0.85)
+    )
+    result_text = ax.text(
+        0.01, 0.91, 'No points selected', transform=ax.transAxes,
+        va='top', fontsize=9,
+        bbox=dict(boxstyle='round', facecolor='white', alpha=0.9)
+    )
+    selected_indices = []
+    selection_artists = []
+
+    def clear_selection():
+        selected_indices.clear()
+        while selection_artists:
+            artist = selection_artists.pop()
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        result_text.set_text('No points selected')
+        fig.canvas.draw_idle()
+
+    def nearest_curve_index(event):
+        return int(valid_indices[int(np.argmin(np.abs(time_s[valid_indices] - event.xdata)))])
+
+    def draw_selection():
+        while selection_artists:
+            artist = selection_artists.pop()
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        for number, idx in enumerate(selected_indices, start=1):
+            marker = ax.scatter(
+                [time_s[idx]], [voltage[idx]], s=85,
+                facecolors='none', edgecolors=COLORS[(number - 1) % len(COLORS)],
+                linewidths=2.2, zorder=8
+            )
+            label = ax.annotate(
+                f"P{number}: {time_s[idx]:.1f}s, {voltage[idx]:.3f}V",
+                (time_s[idx], voltage[idx]), xytext=(8, 8),
+                textcoords='offset points', fontsize=9,
+                color=COLORS[(number - 1) % len(COLORS)]
+            )
+            selection_artists.extend([marker, label])
+
+        if len(selected_indices) == 1:
+            idx = selected_indices[0]
+            result_text.set_text(
+                f"P1  {voltage[idx]:.3f} V | {cumulative_wh[idx]:.2f} Wh | "
+                f"t={time_s[idx]:.1f}s | ESCs={esc_counts[idx]}"
+            )
+        elif len(selected_indices) == 2:
+            first, second = sorted(selected_indices, key=lambda idx: time_s[idx])
+            delta_v = voltage[second] - voltage[first]
+            energy_used = cumulative_wh[second] - cumulative_wh[first]
+            charge_used = cumulative_ah[second] - cumulative_ah[first]
+            segment = slice(first, second + 1)
+            highlight, = ax.plot(
+                curve_time[segment], curve_voltage[segment],
+                color=COLORS[2 % len(COLORS)], linewidth=2.8,
+                alpha=0.9, zorder=6
+            )
+            selection_artists.append(highlight)
+            result_text.set_text(
+                f"V1={voltage[first]:.3f} V   V2={voltage[second]:.3f} V   "
+                f"ΔV={delta_v:+.3f} V\n"
+                f"Energy used={energy_used:.3f} Wh   Charge used={charge_used:.3f} Ah   "
+                f"Δt={time_s[second] - time_s[first]:.1f}s"
+            )
+            fig.savefig(save_path, dpi=140)
+            print(
+                f"Selected {voltage[first]:.3f} V -> {voltage[second]:.3f} V: "
+                f"{energy_used:.3f} Wh, {charge_used:.3f} Ah "
+                f"(delta V {delta_v:+.3f} V)"
+            )
+        fig.canvas.draw_idle()
+
+    def on_click(event):
+        if event.inaxes != ax:
+            return
+        if event.button == 3:
+            clear_selection()
+            return
+        if event.button != 1:
+            return
+        if len(selected_indices) >= 2:
+            clear_selection()
+        selected_indices.append(nearest_curve_index(event))
+        draw_selection()
+
+    fig.canvas.mpl_connect('button_press_event', on_click)
+    plt.tight_layout()
+    fig.savefig(save_path, dpi=140)
+    print(f"Saved interactive voltage-time image: {save_path}")
+    print("Click two times in the graph window; right-click to reset.")
+    plt.show()
+
+
 # =============================================================================
 # Interactive Menu
 # =============================================================================
 
 def print_run_table(stats):
-    print("\n" + "="*85)
-    print(f"{'Run':<5} | {'Duration':<10} | {'Max RPM':<9} | {'Max Curr':<9} | {'Max Temp':<9} | {'Energy':<8} | {'Avg Eff':<8}")
-    print("-"*85)
+    print("\n" + "="*99)
+    print(f"{'Run':<5} | {'Duration':<10} | {'Max RPM':<9} | {'Max/ESC A':<9} | {'Max Temp':<9} | {'ESC Wh':<9} | {'ESC Ah':<8} | {'Avg Eff':<8}")
+    print("-"*99)
     for s in stats:
-        print(f"{s['id']:<5} | {s['duration']:<10.1f} | {s['max_rpm']:<9.0f} | {s['max_curr']:<9.1f} | {s['max_temp']:<9.1f} | {s['energy_wh']:<8.2f} | {s['avg_eff']:<8.1f}")
-    print("="*85)
+        print(f"{s['id']:<5} | {s['duration']:<10.1f} | {s['max_rpm']:<9.0f} | {s['max_curr']:<9.1f} | {s['max_temp']:<9.1f} | {s['energy_wh']:<9.2f} | {s.get('charge_ah', 0):<8.2f} | {s['avg_eff']:<8.1f}")
+    print("="*99)
 
 
 def main():
+    global MIN_CURRENT_THRESHOLD
+
     import argparse
     parser = argparse.ArgumentParser(description='Analyze ArduPilot .BIN log for ESC data')
     parser.add_argument('filepath', nargs='?', help='Path to .BIN file')
-    # Use nargs='+' to consume multiple arguments if user types spaces (e.g. 19, 21)
-    parser.add_argument('--poles', nargs='+', default=["19"], help='Configured ESC pole pairs (default: 19, or list "19,21")')
+    # Use nargs='+' to retain optional per-ESC pole metadata.
+    parser.add_argument('--poles', nargs='+', default=["14"],
+                        help='Motor pole-pair metadata (default: 14; does not scale logged RPM)')
+    parser.add_argument('--rpm-scale', type=float, default=None,
+                        help='Explicit multiplier for logged RPM (default: 1.0)')
+    parser.add_argument('--min-current', type=float, default=None,
+                        help='Per-ESC reliability/filter threshold in amps (default: 15)')
     parser.add_argument('--config', help='Path to JSON config file with analysis overrides')
-    parser.add_argument('--motor', help='Motor spec key (built-in)')
+    parser.add_argument('--motor', choices=sorted(MOTOR_SPECS.keys()),
+                        help=f"Comparison model (default: {DEFAULT_MOTOR_SPEC_KEY})")
     args = parser.parse_args()
 
     config = load_json_config(args.config) if args.config else {}
     motor_key = args.motor or config.get('motor_spec') or DEFAULT_MOTOR_SPEC_KEY
     motor_spec = get_motor_spec(motor_key)
     prop_k = calculate_propeller_constant(motor_spec)
+    rpm_scale = float(args.rpm_scale if args.rpm_scale is not None else config.get('rpm_scale', 1.0))
+    if rpm_scale <= 0:
+        print("Error: --rpm-scale must be greater than zero.")
+        sys.exit(1)
+    MIN_CURRENT_THRESHOLD = float(
+        args.min_current if args.min_current is not None
+        else config.get('min_current_threshold', MIN_CURRENT_THRESHOLD)
+    )
+    if MIN_CURRENT_THRESHOLD < 0:
+        print("Error: --min-current cannot be negative.")
+        sys.exit(1)
 
     esc_channel_map = normalize_esc_channel_map(config.get('esc_channel_map'))
     throttle_pwm_min = int(config.get('throttle_pwm_min', 1000))
@@ -1686,9 +2097,9 @@ def main():
         # Fallback for drag-and-drop or simple run
         if len(sys.argv) > 1 and not sys.argv[1].startswith('-'):
             filepath = sys.argv[1].strip().strip('"').strip("'")
-            poles = 19
+            poles = 14
         else:
-            print("Usage: python plot_esc_data.py <path_to_bin_file> [--poles <count>]")
+            print("Usage: python plot_esc_data.py <path_to_bin_file> [--poles 14] [--rpm-scale 1.0] [--min-current 15]")
             sys.exit(1)
     else:
         filepath = args.filepath.strip().strip('"').strip("'")
@@ -1701,7 +2112,9 @@ def main():
     print(f"\n{'='*50}")
     print(f"ESC Analysis Tool")
     print(f"File: {os.path.basename(filepath)}")
-    print(f"Configured ESC Pole Pairs: {poles} (Scaling RPM by {poles}/14.0)")
+    print(f"Motor Pole Pairs: {poles} (metadata only)")
+    print(f"RPM Scale: {rpm_scale:g} (explicit logged-RPM multiplier)")
+    print(f"Per-ESC Current Threshold: {MIN_CURRENT_THRESHOLD:g} A")
     print(f"Motor Spec: {motor_spec['name']}")
     if motor_spec.get('note'):
         print(f"Spec Note: {motor_spec['note']}")
@@ -1719,8 +2132,8 @@ def main():
     all_esc_data = None
     runs = None
     
-    if is_cache_valid(filepath, poles, esc_channel_map):
-        all_esc_data, runs = load_from_cache(filepath, poles)
+    if is_cache_valid(filepath, poles, rpm_scale, esc_channel_map):
+        all_esc_data, runs = load_from_cache(filepath, poles, rpm_scale)
     
     # If cache miss or invalid, parse the full file
     if all_esc_data is None:
@@ -1736,10 +2149,10 @@ def main():
         
         # Load ALL ESC data from full file
         print("Loading all ESC data...")
-        all_esc_data = load_esc_data(filepath, 0, 0, poles, esc_channel_map)
+        all_esc_data = load_esc_data(filepath, 0, 0, poles, rpm_scale, esc_channel_map)
         
         # Save to cache for next time
-        save_to_cache(filepath, all_esc_data, runs, poles, esc_channel_map)
+        save_to_cache(filepath, all_esc_data, runs, poles, rpm_scale, esc_channel_map)
     
     # Compute run stats (using cached data - FAST)
     stats = []
@@ -1764,10 +2177,12 @@ def main():
     def filter_data_for_run(start_us, end_us):
         """Filter all_esc_data to just the specified time range."""
         filtered = defaultdict(lambda: {'time_us': [], 'time': [], 'rpm': [], 'volt': [], 'curr': [], 'temp': [], 'throttle': []})
-        
+        global_first_time = min(
+            (data['time_us'][0] for data in all_esc_data.values() if data.get('time_us')),
+            default=0
+        )
+
         for inst, data in all_esc_data.items():
-            first_time = data['time_us'][0] if data['time_us'] else 0
-            
             for i, t_us in enumerate(data['time_us']):
                 if start_us and t_us < start_us:
                     continue
@@ -1775,7 +2190,9 @@ def main():
                     break
                 
                 # Recalculate relative time from run start
-                run_start = start_us if start_us else first_time
+                # All ESCs share one origin. Late-starting ESCs retain their
+                # true offset instead of being shifted back to t=0.
+                run_start = start_us if start_us else global_first_time
                 t_sec = (t_us - run_start) / 1e6
                 
                 filtered[inst]['time_us'].append(t_us)
@@ -1829,6 +2246,11 @@ def main():
         if esc_count_mode == 'fixed':
             if esc_count_fixed is not None:
                 esc_count_override = int(esc_count_fixed)
+            else:
+                # With no explicit fixed override, follow the number of ESCs
+                # actually reporting. This handles logs that begin with two
+                # ESCs and later transition to four.
+                esc_count_series = derived.get('total', {}).get('esc_count') or None
         elif esc_count_mode == 'throttle':
             esc_count_series = build_active_esc_count_series(esc_data, derived['total']['time'], active_esc_throttle_pwm)
             if not esc_count_series or max(esc_count_series) == 0:
@@ -1874,9 +2296,9 @@ def main():
         print(f"Current: {run_label} | ESC: [{esc_label}] | Filter: {filter_label} | Eff: {eff_unit_label}")
         print(f"Motor: {motor_spec['name']}")
         if isinstance(poles, dict):
-            print(f"Config: Mixed Poles {poles}")
+            print(f"Pole metadata: Mixed {poles} | RPM scale: {rpm_scale:g}")
         else:
-            print(f"Config: {poles} Pole Pairs (Scale: {poles}/14.0 = {poles/14.0:.3f})")
+            print(f"Pole metadata: {poles} pairs | RPM scale: {rpm_scale:g}")
         print(f"{'='*55}")
         print("[1] Plot ESC Basics (RPM, Volt, Curr, Temp)")
         print("[2] Plot Power (Total Current & Power)")
@@ -1889,7 +2311,10 @@ def main():
         print("[9] Export to CSV")
         print(f"[0] Adjust Low-Pass Filter (RC: {filter_label})")
         print(f"[e] Toggle Efficiency Unit")
-        print(f"[p] Configure Pole Pairs")
+        print(f"[m] Select Motor/Prop Comparison")
+        print(f"[p] Set Pole-Pair Metadata (no RPM scaling)")
+        print(f"[s] Set Explicit RPM Scale (current: {rpm_scale:g})")
+        print(f"[w] Voltage vs Time / Energy Used (click two times)")
         print("[q] Quit")
         
         choice = input("> ").strip().lower()
@@ -1986,9 +2411,39 @@ def main():
             # Toggle efficiency unit
             efficiency_mode = 'rpm_w' if efficiency_mode == 'pct' else 'pct'
             print(f"Switched efficiency unit to: {'RPM/Watt' if efficiency_mode == 'rpm_w' else 'Motor Efficiency (%)'}")
+        elif choice == 'm':
+            print("Available motor/prop comparisons:")
+            motor_keys = sorted(MOTOR_SPECS.keys())
+            for idx, key in enumerate(motor_keys, start=1):
+                spec = MOTOR_SPECS[key]
+                default_mark = " (default)" if key == DEFAULT_MOTOR_SPEC_KEY else ""
+                print(f"  {idx}. {key}: {spec['name']} / {spec['prop']}{default_mark}")
+            val = input("Motor number or key: ").strip()
+            try:
+                if val.isdigit():
+                    selection = int(val)
+                    if selection < 1 or selection > len(motor_keys):
+                        raise ValueError("motor number out of range")
+                    selected_key = motor_keys[selection - 1]
+                else:
+                    selected_key = val
+                if selected_key not in MOTOR_SPECS:
+                    raise ValueError("unknown motor comparison")
+                motor_spec = get_motor_spec(selected_key)
+                motor_key = selected_key
+                prop_k = calculate_propeller_constant(motor_spec)
+                derived.clear()
+                derived.update(compute_derived_metrics(
+                    esc_data, filter_rc, prop_k=prop_k,
+                    current_scale_rules=current_scale_rules
+                ))
+                print(f"Comparison updated to {motor_spec['name']} / {motor_spec['prop']}.")
+            except (ValueError, IndexError):
+                print("Invalid motor selection. Keeping current comparison.")
         elif choice == 'p':
-            print(f"Current Configured Poles: {poles}")
-            print("Enter new configuration:")
+            print(f"Current motor pole-pair metadata: {poles}")
+            print("This value documents the motor only; it does not change logged RPM.")
+            print("Enter new metadata:")
             print("  - Single int (e.g. '19') for all ESCs")
             print("  - Comma list (e.g. '19,21,19,21') for ESC 0,1,2,3")
             print("  - Key:Value (e.g. '0:19, 1:21') for specific instances")
@@ -2011,21 +2466,40 @@ def main():
                     if new_poles < 2: raise ValueError
                 
                 poles = new_poles
-                print(f"Reloading data with config: {poles} ...")
-                
-                # Check cache for new config
-                if is_cache_valid(filepath, poles, esc_channel_map):
-                    all_esc_data, _ = load_from_cache(filepath, poles)
-                else:
-                    print("Parsing bin file for new config...")
-                    all_esc_data = load_esc_data(filepath, 0, 0, poles, esc_channel_map)
-                    save_to_cache(filepath, all_esc_data, runs, poles, esc_channel_map)
-                
-                # Reload current view
-                load_run(current_run_idx)
-                print(f"Configuration updated.")
+                print(f"Pole-pair metadata updated to {poles}; RPM values are unchanged.")
             except Exception as e:
                 print(f"Invalid input: {e}")
+        elif choice == 's':
+            print(f"Current explicit RPM scale: {rpm_scale:g}")
+            print("Enter a direct multiplier for logged RPM (1.0 leaves RPM unchanged):")
+            try:
+                new_rpm_scale = float(input("> ").strip())
+                if new_rpm_scale <= 0:
+                    raise ValueError("scale must be greater than zero")
+                rpm_scale = new_rpm_scale
+                if is_cache_valid(filepath, poles, rpm_scale, esc_channel_map):
+                    all_esc_data, _ = load_from_cache(filepath, poles, rpm_scale)
+                else:
+                    print("Parsing bin file with the new explicit RPM scale...")
+                    all_esc_data = load_esc_data(
+                        filepath, 0, 0, poles, rpm_scale, esc_channel_map
+                    )
+                    save_to_cache(
+                        filepath, all_esc_data, runs, poles, rpm_scale,
+                        esc_channel_map
+                    )
+                load_run(current_run_idx)
+                print(f"RPM scale updated to {rpm_scale:g}.")
+            except Exception as e:
+                print(f"Invalid RPM scale: {e}")
+        elif choice == 'w':
+            plot_interactive_voltage_energy_curve(
+                esc_data,
+                derived,
+                active_escs,
+                title,
+                f"{base_save}_voltage_time_energy.png"
+            )
         elif choice == 'q':
             print("Goodbye!")
             break
