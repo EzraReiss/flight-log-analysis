@@ -1401,7 +1401,7 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
     Creates 4 subplots:
     1. Voltage vs Efficiency (based on mode) - colored by current
     2. Power vs Efficiency (based on mode) - shows efficiency drop at high power
-    3. ESC Input Power vs Efficiency - per-ESC scatter and median curves
+    3. ESC Input Power vs Efficiency - per-ESC scatter
     4. Voltage vs Total Power - shows power delivery at different voltage levels
     
     Args:
@@ -1512,11 +1512,9 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
     if mode == 'pct': ax.set_ylim(0, 110)
     
     # --- Panel 3: ESC Input Power vs Efficiency per ESC ---
-    # Use common power bins for every ESC so the median curves can be compared
-    # at the same electrical operating points. Raw samples remain visible to
-    # show spread and telemetry artifacts.
+    # Plot raw samples only; the voltage-banded response view provides the
+    # separate summarized curves when those are needed.
     ax = axs[1, 0]
-    power_bin_edges = np.linspace(min(all_power), max(all_power), 26)
     for i in active_escs:
         esc_power = np.asarray(per_esc_data_local[i]['power'], dtype=float)
         esc_eff = np.asarray(per_esc_data_local[i]['eff'], dtype=float)
@@ -1529,28 +1527,8 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
         color = COLORS[i % 4]
         ax.scatter(
             esc_power, esc_eff, color=color, alpha=0.14, s=9,
-            edgecolors='none'
+            edgecolors='none', label=f'ESC {i}'
         )
-
-        bin_ids = np.digitize(esc_power, power_bin_edges) - 1
-        median_power = []
-        median_eff = []
-        for bin_id in range(len(power_bin_edges) - 1):
-            in_bin = bin_ids == bin_id
-            # Suppress bins that only contain short transients; those sparse
-            # high-power samples otherwise create misleading median spikes.
-            if np.count_nonzero(in_bin) < 20:
-                continue
-            median_power.append(float(np.median(esc_power[in_bin])))
-            median_eff.append(float(np.median(esc_eff[in_bin])))
-
-        if median_power:
-            ax.plot(
-                median_power, median_eff, color=color, linewidth=2.0,
-                marker='o', markersize=3, label=f'ESC {i} median'
-            )
-        else:
-            ax.scatter([], [], color=color, s=20, label=f'ESC {i}')
     
     ax.set_xlabel('ESC Input Power (W = V × I)')
     ax.set_ylabel(ylabel)
@@ -1604,144 +1582,6 @@ def plot_system_analysis(esc_data, derived, active_escs, title_prefix, save_path
     plt.tight_layout()
     plt.savefig(save_path, dpi=120)
     print(f"Saved: {save_path}")
-    plt.show()
-
-
-def plot_efficiency_power_time_3d(esc_data, derived, active_escs, title_prefix, save_path, mode='pct'):
-    """Plot per-ESC efficiency against input power and time, colored by voltage.
-
-    The graph window is rotatable. Separate ESC panels keep the voltage color
-    scale available for operating-history comparisons without using color for
-    both ESC identity and voltage.
-    """
-    setup_style()
-
-    ylabel = 'Efficiency (%)' if mode == 'pct' else 'Efficiency (RPM/W)'
-    data_key = 'efficiency_pct' if mode == 'pct' else 'efficiency_rpm_w'
-    selected = [
-        i for i in active_escs
-        if i in esc_data and i in derived.get('per_esc', {})
-    ]
-
-    valid_by_esc = {}
-    all_voltages = []
-    for i in selected:
-        data = esc_data[i]
-        deriv = derived['per_esc'][i]
-        times = np.asarray(data.get('time', []), dtype=float)
-        volts = np.asarray(deriv.get('volt_filtered', data.get('volt', [])), dtype=float)
-        currents = np.asarray(deriv.get('curr_filtered', data.get('curr', [])), dtype=float)
-        powers = np.asarray(deriv.get('power', []), dtype=float)
-        efficiencies = np.asarray(
-            deriv.get(data_key, deriv.get('efficiency', [])), dtype=float
-        )
-        n = min(len(times), len(volts), len(currents), len(powers), len(efficiencies))
-        times, volts = times[:n], volts[:n]
-        currents, powers = currents[:n], powers[:n]
-        efficiencies = efficiencies[:n]
-        valid = (
-            np.isfinite(times) & np.isfinite(volts) & np.isfinite(currents)
-            & np.isfinite(powers) & np.isfinite(efficiencies)
-            & (currents >= MIN_CURRENT_THRESHOLD) & (powers > 0)
-        )
-        rows = {
-            'time': times[valid], 'volt': volts[valid],
-            'power': powers[valid], 'efficiency': efficiencies[valid],
-        }
-        valid_by_esc[i] = rows
-        all_voltages.extend(rows['volt'].tolist())
-
-    if not selected or not all_voltages:
-        print('No valid data available for the 3D efficiency plot.')
-        return
-
-    voltage_min = float(np.min(all_voltages))
-    voltage_max = float(np.max(all_voltages))
-    if voltage_max <= voltage_min:
-        voltage_max = voltage_min + 1.0
-
-    column_count = 2 if len(selected) > 1 else 1
-    row_count = int(np.ceil(len(selected) / column_count))
-    fig = plt.figure(figsize=(14, max(6, 5.5 * row_count)))
-    fig.suptitle(
-        f'{title_prefix} - {ylabel} vs ESC Input Power and Time '
-        f'[Current >= {MIN_CURRENT_THRESHOLD:g}A]',
-        fontsize=14
-    )
-    axes = []
-    first_scatter = None
-
-    for panel, i in enumerate(selected, start=1):
-        ax = fig.add_subplot(row_count, column_count, panel, projection='3d')
-        axes.append(ax)
-        rows = valid_by_esc[i]
-        point_count = len(rows['time'])
-        if point_count == 0:
-            ax.text2D(0.5, 0.5, 'No valid data', ha='center', va='center', transform=ax.transAxes)
-            ax.set_title(f'ESC {i}')
-            continue
-
-        # Preserve the complete time span while keeping rotation responsive.
-        stride = max(1, int(np.ceil(point_count / 4000)))
-        take = slice(None, None, stride)
-        scatter = ax.scatter(
-            rows['power'][take], rows['time'][take], rows['efficiency'][take],
-            c=rows['volt'][take], cmap='viridis',
-            vmin=voltage_min, vmax=voltage_max,
-            s=4, alpha=0.16, edgecolors='none', depthshade=False
-        )
-        if first_scatter is None:
-            first_scatter = scatter
-
-        # Trace the response in voltage slices so the shape is readable without
-        # having to infer it from a dense 3D point cloud. Each trajectory uses
-        # medians in power bins; time remains an actual measured coordinate.
-        voltage_edges = np.linspace(voltage_min, voltage_max, 5)
-        power_lo, power_hi = np.percentile(rows['power'], [1, 99])
-        power_edges = np.linspace(power_lo, power_hi, 25)
-        color_map = plt.get_cmap('viridis')
-        for band_index in range(len(voltage_edges) - 1):
-            lower, upper = voltage_edges[band_index:band_index + 2]
-            if band_index == len(voltage_edges) - 2:
-                in_voltage_band = (rows['volt'] >= lower) & (rows['volt'] <= upper)
-            else:
-                in_voltage_band = (rows['volt'] >= lower) & (rows['volt'] < upper)
-            curve_power, curve_time, curve_eff = [], [], []
-            for power_start, power_end in zip(power_edges[:-1], power_edges[1:]):
-                in_bin = (
-                    in_voltage_band & (rows['power'] >= power_start)
-                    & (rows['power'] < power_end)
-                )
-                if np.count_nonzero(in_bin) < 20:
-                    continue
-                curve_power.append(float(np.median(rows['power'][in_bin])))
-                curve_time.append(float(np.median(rows['time'][in_bin])))
-                curve_eff.append(float(np.median(rows['efficiency'][in_bin])))
-            if len(curve_power) >= 2:
-                band_voltage = 0.5 * (lower + upper)
-                normalized_voltage = (band_voltage - voltage_min) / (voltage_max - voltage_min)
-                ax.plot(
-                    curve_power, curve_time, curve_eff,
-                    color=color_map(normalized_voltage), linewidth=2.8,
-                    marker='o', markersize=2.8, alpha=0.95
-                )
-        ax.set_title(f'ESC {i}')
-        ax.set_xlabel('Input Power (W)')
-        ax.set_ylabel('Time (s)')
-        ax.set_zlabel(ylabel)
-        if mode == 'pct':
-            ax.set_zlim(0, 110)
-        ax.view_init(elev=23, azim=-58)
-        ax.grid(True, alpha=0.25)
-
-    fig.subplots_adjust(left=0.04, right=0.87, bottom=0.05, top=0.91, wspace=0.08, hspace=0.14)
-    if first_scatter is not None:
-        colorbar_axis = fig.add_axes([0.91, 0.18, 0.016, 0.64])
-        colorbar = fig.colorbar(first_scatter, cax=colorbar_axis)
-        colorbar.set_label('ESC Voltage (V)')
-    fig.savefig(save_path, dpi=140)
-    print(f'Saved rotatable 3D efficiency plot: {save_path}')
-    print('Drag in the graph window to rotate; use the toolbar to zoom or reset the view.')
     plt.show()
 
 
@@ -2600,7 +2440,6 @@ def main():
         print(f"[p] Set Pole-Pair Metadata (no RPM scaling)")
         print(f"[s] Set Explicit RPM Scale (current: {rpm_scale:g})")
         print(f"[w] Voltage vs Time / Energy Used (click two times)")
-        print(f"[d] 3D Efficiency vs ESC Power / Time (voltage color)")
         print(f"[g] Efficiency response curves by voltage band")
         print("[q] Quit")
         
@@ -2641,15 +2480,6 @@ def main():
                 esc_count_override,
                 efficiency_mode,
                 esc_count_series
-            )
-        elif choice == 'd':
-            plot_efficiency_power_time_3d(
-                esc_data,
-                derived,
-                active_escs,
-                title,
-                f"{base_save}_efficiency_power_time_3d.png",
-                efficiency_mode
             )
         elif choice == 'g':
             plot_efficiency_power_voltage_curves(
