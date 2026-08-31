@@ -21,7 +21,9 @@ __pycache__/
 # Analysis output folders
 *_analysis/
 !python-analysis/esc_analysis/
-!python-analysis/esc_analysis/**
+!python-analysis/esc_analysis/*.py
+!python-analysis/esc_analysis/plotting/
+!python-analysis/esc_analysis/plotting/*.py
 
 # Python virtual environments
 venv/
