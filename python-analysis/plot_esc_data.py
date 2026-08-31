@@ -44,7 +44,7 @@ MIN_THROTTLE_THRESHOLD = 1400  # PWM value (typically 1000-2000 range)
 DEFAULT_FILTER_RC = 2.0
 
 # Cache directory (stored next to the bin file)
-CACHE_VERSION = "v9"  # v9 separates explicit RPM scaling from motor pole-pair metadata
+CACHE_VERSION = "v10"  # v10 stores motor-channel run-detection settings
 
 
 def lowpass_filter(data, times, rc_constant):
@@ -360,7 +360,9 @@ def get_cache_meta_path(filepath, poles, rpm_scale=1.0):
     suffix = get_poles_cache_key(poles, rpm_scale)
     return os.path.join(output_dir, f"cache_meta_{suffix}.json")
 
-def is_cache_valid(filepath, poles, rpm_scale, esc_channel_map):
+def is_cache_valid(
+        filepath, poles, rpm_scale, esc_channel_map,
+        run_detection_config=None):
     """Check if cached data exists and is still valid."""
     cache_path = get_cache_path(filepath, poles, rpm_scale)
     meta_path = get_cache_meta_path(filepath, poles, rpm_scale)
@@ -389,6 +391,10 @@ def is_cache_valid(filepath, poles, rpm_scale, esc_channel_map):
         # Check ESC channel map matches
         if meta.get('esc_channel_map') != esc_channel_map_to_meta(esc_channel_map):
             print("Cache ESC channel map mismatch, reparsing...")
+            return False
+
+        if meta.get('run_detection') != run_detection_config:
+            print("Cache run-detection settings mismatch, reparsing...")
             return False
         
         # Check file modification time
@@ -450,7 +456,9 @@ def load_from_cache(filepath, poles, rpm_scale):
         return None, None
 
 
-def save_to_cache(filepath, esc_data, runs, poles, rpm_scale, esc_channel_map):
+def save_to_cache(
+        filepath, esc_data, runs, poles, rpm_scale, esc_channel_map,
+        run_detection_config=None):
     """Save ESC data and runs to cache (CSV format for easy viewing)."""
     cache_path = get_cache_path(filepath, poles, rpm_scale)
     meta_path = get_cache_meta_path(filepath, poles, rpm_scale)
@@ -486,7 +494,8 @@ def save_to_cache(filepath, esc_data, runs, poles, rpm_scale, esc_channel_map):
             'esc_count': len(esc_data),
             'poles': poles,
             'rpm_scale': float(rpm_scale),
-            'esc_channel_map': esc_channel_map_to_meta(esc_channel_map)
+            'esc_channel_map': esc_channel_map_to_meta(esc_channel_map),
+            'run_detection': run_detection_config,
         }
         
         with open(meta_path, 'w') as f:
@@ -501,11 +510,16 @@ def save_to_cache(filepath, esc_data, runs, poles, rpm_scale, esc_channel_map):
 # Data Loading Functions
 # =============================================================================
 
-def detect_runs(filepath, throttle_threshold=1200, cooldown_sec=10.0):
+def detect_runs(
+        filepath, throttle_threshold=1200, cooldown_sec=10.0,
+        motor_channels=None, min_run_sec=15.0):
     """Scans log for RCOU messages to identify active runs.
-    
-    Uses max throttle rather than average to handle 2-ESC and 4-ESC configurations.
+
+    Activity is taken only from configured motor outputs. This prevents a servo
+    or neutral-centered output from holding the run open. Brief motor spin-ups
+    shorter than ``min_run_sec`` are ignored.
     """
+    motor_channels = sorted(set(motor_channels or [1, 2, 3, 4]))
     try:
         mlog = mavutil.mavlink_connection(filepath)
     except Exception as e:
@@ -515,7 +529,7 @@ def detect_runs(filepath, throttle_threshold=1200, cooldown_sec=10.0):
     runs = []
     in_run = False
     current_run_start = 0
-    potential_end_time = 0
+    last_active_time = 0
     last_msg_time = 0
     
     while True:
@@ -525,33 +539,32 @@ def detect_runs(filepath, throttle_threshold=1200, cooldown_sec=10.0):
                 break
             
             last_msg_time = msg.TimeUS
-            # Get throttle values from channels 1-8 (covers most ESC configurations)
-            # Use max throttle to detect activity (works for 2, 4, 6, 8 ESC setups)
-            throttles = [getattr(msg, f'C{i}', 0) for i in range(1, 9)]
-            # Filter out invalid/unused channels (typically 0 or very low values)
+            throttles = [getattr(msg, f'C{i}', 0) for i in motor_channels]
             active_throttles = [t for t in throttles if t > 900]
             max_throttle = max(active_throttles) if active_throttles else 0
-            
-            if not in_run:
-                if max_throttle > throttle_threshold:
+
+            if max_throttle > throttle_threshold:
+                if not in_run:
                     in_run = True
                     current_run_start = msg.TimeUS
-                    potential_end_time = 0
+                last_active_time = msg.TimeUS
             else:
-                if max_throttle < throttle_threshold:
-                    if potential_end_time == 0:
-                        potential_end_time = msg.TimeUS
-                    elif (msg.TimeUS - potential_end_time) > (cooldown_sec * 1e6):
-                        runs.append((current_run_start, msg.TimeUS))
-                        in_run = False
-                        potential_end_time = 0
-                else:
-                    potential_end_time = 0
+                if (
+                        in_run and last_active_time
+                        and (msg.TimeUS - last_active_time) > cooldown_sec * 1e6):
+                    active_duration = (last_active_time - current_run_start) / 1e6
+                    if active_duration >= min_run_sec:
+                        runs.append((current_run_start, last_active_time))
+                    in_run = False
+                    last_active_time = 0
         except:
             continue
             
     if in_run:
-        runs.append((current_run_start, last_msg_time))
+        run_end = last_active_time or last_msg_time
+        active_duration = (run_end - current_run_start) / 1e6
+        if active_duration >= min_run_sec:
+            runs.append((current_run_start, run_end))
          
     return runs
 
@@ -2486,6 +2499,19 @@ def main():
         sys.exit(1)
 
     esc_channel_map = normalize_esc_channel_map(config.get('esc_channel_map'))
+    configured_run_channels = config.get('run_detection_channels')
+    if configured_run_channels is not None:
+        run_detection_channels = sorted({int(value) for value in configured_run_channels})
+    elif esc_channel_map:
+        run_detection_channels = sorted(set(esc_channel_map.values()))
+    else:
+        run_detection_channels = [1, 2, 3, 4]
+    run_detection_config = {
+        'channels': run_detection_channels,
+        'throttle_threshold_pwm': float(config.get('run_throttle_threshold_pwm', 1200.0)),
+        'cooldown_sec': float(config.get('run_cooldown_sec', 10.0)),
+        'min_run_sec': float(config.get('run_min_duration_sec', 15.0)),
+    }
     throttle_pwm_min = int(config.get('throttle_pwm_min', 1000))
     throttle_pwm_max = int(config.get('throttle_pwm_max', 2000))
     current_scale_rules = normalize_current_scale_rules(
@@ -2567,6 +2593,11 @@ def main():
     print(f"RPM Scale: {rpm_scale:g} (explicit logged-RPM multiplier)")
     print(f"Per-ESC Current Threshold: {MIN_CURRENT_THRESHOLD:g} A")
     print(f"Motor Spec: {motor_spec['name']}")
+    print(
+        f"Run Detection: RCOU {run_detection_channels}, "
+        f">{run_detection_config['throttle_threshold_pwm']:g} PWM, "
+        f">={run_detection_config['min_run_sec']:g}s"
+    )
     if motor_spec.get('note'):
         print(f"Spec Note: {motor_spec['note']}")
     if current_scale_rules:
@@ -2583,7 +2614,9 @@ def main():
     all_esc_data = None
     runs = None
     
-    if is_cache_valid(filepath, poles, rpm_scale, esc_channel_map):
+    if is_cache_valid(
+            filepath, poles, rpm_scale, esc_channel_map,
+            run_detection_config):
         all_esc_data, runs = load_from_cache(filepath, poles, rpm_scale)
     
     # If cache miss or invalid, parse the full file
@@ -2592,7 +2625,13 @@ def main():
         
         # Detect runs
         print("Scanning for runs...")
-        runs = detect_runs(filepath)
+        runs = detect_runs(
+            filepath,
+            throttle_threshold=run_detection_config['throttle_threshold_pwm'],
+            cooldown_sec=run_detection_config['cooldown_sec'],
+            motor_channels=run_detection_config['channels'],
+            min_run_sec=run_detection_config['min_run_sec'],
+        )
         
         if not runs:
             print("No runs detected.")
@@ -2603,7 +2642,9 @@ def main():
         all_esc_data = load_esc_data(filepath, 0, 0, poles, rpm_scale, esc_channel_map)
         
         # Save to cache for next time
-        save_to_cache(filepath, all_esc_data, runs, poles, rpm_scale, esc_channel_map)
+        save_to_cache(
+            filepath, all_esc_data, runs, poles, rpm_scale, esc_channel_map,
+            run_detection_config)
     
     # Compute run stats (using cached data - FAST)
     stats = []
@@ -2941,7 +2982,9 @@ def main():
                 if new_rpm_scale <= 0:
                     raise ValueError("scale must be greater than zero")
                 rpm_scale = new_rpm_scale
-                if is_cache_valid(filepath, poles, rpm_scale, esc_channel_map):
+                if is_cache_valid(
+                        filepath, poles, rpm_scale, esc_channel_map,
+                        run_detection_config):
                     all_esc_data, _ = load_from_cache(filepath, poles, rpm_scale)
                 else:
                     print("Parsing bin file with the new explicit RPM scale...")
@@ -2950,7 +2993,7 @@ def main():
                     )
                     save_to_cache(
                         filepath, all_esc_data, runs, poles, rpm_scale,
-                        esc_channel_map
+                        esc_channel_map, run_detection_config
                     )
                 load_run(current_run_idx)
                 print(f"RPM scale updated to {rpm_scale:g}.")
