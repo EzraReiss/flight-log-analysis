@@ -66,7 +66,7 @@ def calculate_energy_between_times(esc_data, per_esc, selected_escs, start_s, en
 
 
 def plot_interactive_voltage_energy_curve(esc_data, derived, active_escs, title_prefix, save_path):
-    """Show voltage versus time and measure energy between two clicked times."""
+    """Show voltage/current versus time and measure energy between clicked times."""
     synchronized = build_synchronized_total_series(
         esc_data, derived.get('per_esc', {}), active_escs
     )
@@ -111,23 +111,42 @@ def plot_interactive_voltage_energy_curve(esc_data, derived, active_escs, title_
 
     setup_style()
     fig, ax = plt.subplots(figsize=(12, 7))
-    fig.suptitle(f"{title_prefix} - Voltage vs Time / Energy Interval", fontsize=14)
+    fig.suptitle(
+        f"{title_prefix} - Voltage and Summed ESC Current / Energy Interval",
+        fontsize=14
+    )
     curve_time = np.where(valid, time_s, np.nan)
     curve_voltage = np.where(valid, voltage, np.nan)
-    ax.plot(curve_time, curve_voltage, color='0.45', linewidth=1.0, alpha=0.65)
+    curve_current = np.where(valid, current, np.nan)
+    voltage_line, = ax.plot(
+        curve_time, curve_voltage, color=COLORS[0], linewidth=1.6,
+        label='Average ESC voltage'
+    )
+
+    current_axis = ax.twinx()
+    current_line, = current_axis.plot(
+        curve_time, curve_current, color=COLORS[3], linewidth=1.4,
+        alpha=0.85, label='Summed ESC current'
+    )
 
     # Keep the scatter responsive on large logs while retaining the full curve
     # for nearest-point selection and energy calculations.
     plot_step = max(1, len(valid_indices) // 3500)
     plotted = valid_indices[::plot_step]
-    scatter = ax.scatter(
-        time_s[plotted], voltage[plotted], c=current[plotted],
-        cmap='viridis', s=9, alpha=0.65, edgecolors='none'
+    ax.scatter(
+        time_s[plotted], voltage[plotted], color=COLORS[0],
+        s=8, alpha=0.35, edgecolors='none'
     )
-    colorbar = fig.colorbar(scatter, ax=ax)
-    colorbar.set_label('Summed ESC current (A)')
     ax.set_xlabel('Time since selected log start (s)')
-    ax.set_ylabel('Average reporting-ESC voltage (V)')
+    ax.set_ylabel('Average reporting-ESC voltage (V)', color=COLORS[0])
+    ax.tick_params(axis='y', labelcolor=COLORS[0])
+    current_axis.set_ylabel('Summed current across reporting ESCs (A)', color=COLORS[3])
+    current_axis.tick_params(axis='y', labelcolor=COLORS[3])
+    ax.legend(
+        [voltage_line, current_line],
+        [voltage_line.get_label(), current_line.get_label()],
+        loc='lower left'
+    )
     ax.grid(True, alpha=0.3)
 
     instruction = ax.text(
@@ -182,7 +201,8 @@ def plot_interactive_voltage_energy_curve(esc_data, derived, active_escs, title_
         if len(selected_indices) == 1:
             idx = selected_indices[0]
             result_text.set_text(
-                f"P1  {voltage[idx]:.3f} V | {cumulative_wh[idx]:.2f} Wh | "
+                f"P1  {voltage[idx]:.3f} V | {current[idx]:.2f} A | "
+                f"{cumulative_wh[idx]:.2f} Wh | {cumulative_ah[idx]:.3f} Ah | "
                 f"t={time_s[idx]:.1f}s | ESCs={esc_counts[idx]}"
             )
         elif len(selected_indices) == 2:
@@ -190,18 +210,27 @@ def plot_interactive_voltage_energy_curve(esc_data, derived, active_escs, title_
             delta_v = voltage[second] - voltage[first]
             energy_used = cumulative_wh[second] - cumulative_wh[first]
             charge_used = cumulative_ah[second] - cumulative_ah[first]
+            duration_s = time_s[second] - time_s[first]
+            mean_current = charge_used * 3600 / duration_s if duration_s > 0 else float('nan')
+            mean_power = energy_used * 3600 / duration_s if duration_s > 0 else float('nan')
             segment = slice(first, second + 1)
             highlight, = ax.plot(
                 curve_time[segment], curve_voltage[segment],
                 color=COLORS[2 % len(COLORS)], linewidth=2.8,
                 alpha=0.9, zorder=6
             )
-            selection_artists.append(highlight)
+            current_highlight, = current_axis.plot(
+                curve_time[segment], curve_current[segment],
+                color=COLORS[1 % len(COLORS)], linewidth=2.6,
+                alpha=0.9, zorder=6
+            )
+            selection_artists.extend([highlight, current_highlight])
             result_text.set_text(
                 f"V1={voltage[first]:.3f} V   V2={voltage[second]:.3f} V   "
                 f"ΔV={delta_v:+.3f} V\n"
                 f"Energy used={energy_used:.3f} Wh   Charge used={charge_used:.3f} Ah   "
-                f"Δt={time_s[second] - time_s[first]:.1f}s"
+                f"Δt={duration_s:.1f}s\n"
+                f"Mean current={mean_current:.2f} A   Mean power={mean_power:.1f} W"
             )
             fig.savefig(save_path, dpi=140)
             print(
@@ -212,7 +241,7 @@ def plot_interactive_voltage_energy_curve(esc_data, derived, active_escs, title_
         fig.canvas.draw_idle()
 
     def on_click(event):
-        if event.inaxes != ax:
+        if event.inaxes not in (ax, current_axis):
             return
         if event.button == 3:
             clear_selection()
@@ -230,4 +259,3 @@ def plot_interactive_voltage_energy_curve(esc_data, derived, active_escs, title_
     print(f"Saved interactive voltage-time image: {save_path}")
     print("Click two times in the graph window; right-click to reset.")
     plt.show()
-

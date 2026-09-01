@@ -5,7 +5,6 @@ import numpy as np
 
 from .. import runtime
 from ..constants import COLORS
-from ..metrics import build_synchronized_total_series
 from .common import setup_style
 
 def plot_efficiency_power_voltage_curves(
@@ -71,21 +70,12 @@ def plot_efficiency_power_voltage_curves(
         power_max = power_min + 1.0
     power_edges = np.linspace(power_min, power_max, 29)
 
-    synchronized = build_synchronized_total_series(
-        esc_data, derived.get('per_esc', {}), sorted(esc_data)
-    )
-
     column_count = 2 if len(selected) > 1 else 1
     row_count = int(np.ceil(len(selected) / column_count))
-    fig = plt.figure(figsize=(14, max(8.0, 5.0 * row_count + 3.0)))
-    grid = fig.add_gridspec(
-        row_count + 1, column_count,
-        height_ratios=[1.0] * row_count + [0.62]
+    fig, axes = plt.subplots(
+        row_count, column_count, figsize=(14, max(5.5, 5.0 * row_count)),
+        sharex=True, sharey=True, squeeze=False
     )
-    axes = np.asarray([
-        [fig.add_subplot(grid[row, column]) for column in range(column_count)]
-        for row in range(row_count)
-    ])
     fig.suptitle(
         f'{title_prefix} - {ylabel} vs ESC Input Power by Voltage Band '
         f'[Current >= {runtime.options.min_current_threshold:g}A]', fontsize=14
@@ -152,44 +142,13 @@ def plot_efficiency_power_voltage_curves(
     for empty_panel in range(len(selected), axes.size):
         axes.flat[empty_panel].set_visible(False)
 
-    summary_ax = fig.add_subplot(grid[row_count, :])
-    if synchronized.get('time'):
-        summary_time = np.asarray(synchronized['time'], dtype=float)
-        average_voltage = np.asarray(synchronized['avg_volt'], dtype=float)
-        summed_current = np.asarray(synchronized['curr'], dtype=float)
-        summary_ax.plot(
-            summary_time, average_voltage, color=COLORS[0], linewidth=1.6,
-            label='Average ESC voltage'
-        )
-        summary_ax.set_ylabel('Average ESC voltage (V)', color=COLORS[0])
-        summary_ax.tick_params(axis='y', labelcolor=COLORS[0])
-
-        current_axis = summary_ax.twinx()
-        current_axis.plot(
-            summary_time, summed_current, color=COLORS[3], linewidth=1.5,
-            label='Summed ESC current'
-        )
-        current_axis.set_ylabel('Summed current across ESCs (A)', color=COLORS[3])
-        current_axis.tick_params(axis='y', labelcolor=COLORS[3])
-
-        lines = summary_ax.get_lines() + current_axis.get_lines()
-        summary_ax.legend(lines, [line.get_label() for line in lines], loc='best')
-    else:
-        summary_ax.text(
-            0.5, 0.5, 'No synchronized voltage/current data',
-            ha='center', va='center', transform=summary_ax.transAxes
-        )
-    summary_ax.set_title('Voltage and summed current across all reporting ESCs')
-    summary_ax.set_xlabel('Elapsed time (s)')
-    summary_ax.grid(True, alpha=0.25)
-
     fig.text(
         0.5, 0.012,
         'Line = median in each power bin; shaded region = middle 50% of samples. '
         'Voltage and elapsed time are strongly linked in this discharge test.',
         ha='center', fontsize=9
     )
-    fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
+    fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.94])
     fig.savefig(save_path, dpi=150)
     print(f'Saved efficiency response curves: {save_path}')
     plt.show()
